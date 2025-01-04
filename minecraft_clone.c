@@ -9,11 +9,18 @@
 typedef enum {PLAINS, DESERT, FOREST, MOUNTAINS} WorldType;
 WorldType selectedWorldType;
 
+unsigned int seed;
+
 void generateTerrain();
 void loadTextures();
 void setCameraAboveTerrain();
 
 void generateWorld() {
+    seed = rand();
+    if (seed == 0) {
+        seed = 100000000000 + rand() % 899999999999;
+    }
+    printf("World Seed: %u", seed);
     selectedWorldType = (WorldType)(rand() % 4);  // Randomly select a world type
     generateTerrain();                            // Generate the terrain based on the world type
     setCameraAboveTerrain();                      // Set camera position above the terrain
@@ -22,8 +29,9 @@ void generateWorld() {
 
 #define WIDTH 800
 #define HEIGHT 600
-#define WORLD_SIZE 128
+#define WORLD_SIZE 256
 #define HEIGHT_SCALE 20.0f
+
 #define MOVE_SPEED 0.5f
 #define TURN_SPEED 1.5f
 #define MOUSE_SENSITIVITY 0.1f
@@ -37,7 +45,7 @@ int lastMouseX = WIDTH / 2;
 int lastMouseY = HEIGHT / 2;
 
 float perlinNoise2D(float x, float y) {
-    int n = (int)x + (int)y * 57;
+    int n = (int)x + (int)y * 57 + seed;
     n = (n << 13) ^ n;
     return (1.0 - ((n * (n * n * 15731 + 789221) + 1376312589) & 0x7fffffff) / 1073741824.0);
 }
@@ -70,27 +78,43 @@ void loadTextures() {
 }
 
 void generateTerrain() {
-    float frequency;
-    switch (selectedWorldType) {
-        case DESERT:
-            frequency = 8;
-            break;
-        case FOREST:
-            frequency = 15;
-            break;
-        case MOUNTAINS:
-            frequency = 25;
-            break;
-        default:
-            frequency = 10;
-            break;
-    }
+    float amplitude, frequency;
+    int octaves = 5;  // More octaves for varied terrain
+    float persistence = 0.5f;  // Amplitude reduction per layer
 
     for (int x = 0; x < WORLD_SIZE; x++) {
         for (int z = 0; z < WORLD_SIZE; z++) {
             float nx = (float)x / WORLD_SIZE - 0.5f;
             float nz = (float)z / WORLD_SIZE - 0.5f;
-            world[x][z] = (perlinNoise2D(nx * frequency, nz * frequency) + 1) / 2 * HEIGHT_SCALE;
+            float height = 0.0f;
+            amplitude = 1.0f;
+            frequency = 8.0f;
+
+            // Apply Perlin noise with multiple octaves for more detailed terrain
+            for (int i = 0; i < octaves; i++) {
+                height += (perlinNoise2D(nx * frequency, nz * frequency) + 1) / 2 * amplitude * HEIGHT_SCALE;
+                frequency *= 2.0f;
+                amplitude *= persistence;
+            }
+
+            // Modify height further based on world type
+            switch (selectedWorldType) {
+                case DESERT:
+                    height = (perlinNoise2D(nx * 10, nz * 10) + 1) / 2 * HEIGHT_SCALE * 0.5f;
+                    break;
+                case FOREST:
+                    height += perlinNoise2D(nx * 15, nz * 15) * 3.0f;
+                    break;
+                case MOUNTAINS:
+                    height = pow((perlinNoise2D(nx * 30, nz * 30) + 1) / 2, 3) * HEIGHT_SCALE * 3.0f;
+                    break;
+                case PLAINS:
+                default:
+                    height = (perlinNoise2D(nx * 6, nz * 6) + 1) / 2 * HEIGHT_SCALE * 0.8f;
+                    break;
+            }
+
+            world[x][z] = height;
         }
     }
 }
