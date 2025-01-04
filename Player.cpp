@@ -1,9 +1,11 @@
 
 // Player.cpp
-#include "Player.h"
-
-Player::Player() : x(0), y(10), z(0) {}
+Player::Player() : x(0.0f), y(1.0f), z(5.0f) {}
 
 void Player::update() {
-    // Update player movement
+    // Placeholder update logic
 }
+
+float Player::getX() const { return x; }
+float Player::getY() const { return y; }
+float Player::getZ() const { return z; }

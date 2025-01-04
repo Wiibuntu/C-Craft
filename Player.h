@@ -6,6 +6,9 @@ class Player {
 public:
     Player();
     void update();
+    float getX() const;
+    float getY() const;
+    float getZ() const;
 
 private:
     float x, y, z;
