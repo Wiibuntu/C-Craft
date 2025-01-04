@@ -4,14 +4,15 @@
 #include "World.h"
 #include "Player.h"
 #include "Renderer.h"
+#include "glfw3.h"
 
 class Game {
 public:
     Game();
-    void run();
+    void run(GLFWwindow* window);
 
 private:
-    void processInput();
+    void processInput(GLFWwindow* window);
     void update();
     void render();
 

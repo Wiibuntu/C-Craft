@@ -5,25 +5,28 @@
 
 Game::Game() : isRunning(true) {}
 
-void Game::run() {
-    while (isRunning) {
-        processInput();
+void Game::run(GLFWwindow* window) {
+    while (!glfwWindowShouldClose(window)) {
+        processInput(window);
         update();
         render();
+
+        glfwSwapBuffers(window);
+        glfwPollEvents();
     }
 }
 
-void Game::processInput() {
-    // Handle input (move player, exit game, etc.)
+void Game::processInput(GLFWwindow* window) {
+    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
+        glfwSetWindowShouldClose(window, true);
+    }
 }
 
 void Game::update() {
-    // Update world, player, physics, etc.
     player.update();
 }
 
 void Game::render() {
     renderer.render(world, player);
 }
-
 
