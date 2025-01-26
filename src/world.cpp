@@ -1,5 +1,6 @@
 #include "world.h"
 #include <iostream>
+#include "player.h"
 #include <glm/glm.hpp>
 
 World::World() {
@@ -36,11 +37,16 @@ void World::render(Renderer& renderer, const Player& player) {
     }
 }
 
+void World::addBlock(BlockType type, glm::vec3 position) {
+    blocks.emplace_back(type, position);
+}
+
+// Ensure this matches the declaration in world.h
 BlockType World::getBlockAtPosition(const glm::vec3& position) const {
     for (const Block& block : blocks) {
         if (block.getPosition() == position) {
             return block.getType();
         }
     }
-    return BlockType::Air; // Default to air if no block found
+    return BlockType::Air; // Default to air if no block is found
 }

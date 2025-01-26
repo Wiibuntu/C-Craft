@@ -13,7 +13,8 @@ public:
     World();
     void render(Renderer& renderer, const Player& player);
     void generate();
-    BlockType getBlockAtPosition(const glm::vec3& position) const;
+    void addBlock(BlockType type, glm::vec3 position);
+    BlockType getBlockAtPosition(const glm::vec3& position) const; // Declare here
 
 private:
     std::vector<Block> blocks; // Store blocks in the world

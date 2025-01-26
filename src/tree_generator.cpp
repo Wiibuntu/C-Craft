@@ -1,6 +1,6 @@
 #include "tree_generator.h"
-#include "block.h" // Include for BlockType
-#include "world.h" // Include World to access addBlock
+#include "block.h"
+#include "world.h"
 
 void TreeGenerator::generateTree(World& world, glm::vec3 basePosition) {
     // Generate trunk

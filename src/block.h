@@ -8,6 +8,7 @@ enum class BlockType {
     Grass,
     Dirt,
     Stone,
+    Wood,   // Add Wood
     Air
 };
 
