@@ -1,9 +1,10 @@
 #ifndef WORLD_H
 #define WORLD_H
 
-#include <vector>       // Include vector for std::vector
+#include <vector>
 #include "renderer.h"
-#include "block.h"      // Include Block and BlockType
+#include "block.h"
+#include "perlin_noise.h"
 
 class Player; // Forward declare Player
 
@@ -12,7 +13,7 @@ public:
     World();
     void render(Renderer& renderer, const Player& player);
     void generate();
-    void addBlock(BlockType type, glm::vec3 position); // Add a block to the world
+    BlockType getBlockAtPosition(const glm::vec3& position) const;
 
 private:
     std::vector<Block> blocks; // Store blocks in the world

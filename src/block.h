@@ -8,16 +8,14 @@ enum class BlockType {
     Grass,
     Dirt,
     Stone,
-    Wood
+    Air
 };
 
 class Block {
 public:
     Block(BlockType type, glm::vec3 position);
-
     BlockType getType() const;
     glm::vec3 getPosition() const;
-
     void render(Renderer& renderer) const;
 
 private:

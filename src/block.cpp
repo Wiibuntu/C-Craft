@@ -11,5 +11,6 @@ glm::vec3 Block::getPosition() const {
 }
 
 void Block::render(Renderer& renderer) const {
-    // Use renderer to draw the block using its position and type
+    // Placeholder rendering logic
+    // Use OpenGL to draw a cube at the block's position
 }
