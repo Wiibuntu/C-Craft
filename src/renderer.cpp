@@ -1,5 +1,6 @@
 #include "renderer.h"
 #include <iostream>
+#include <glad/glad.h> // Ensure glad is included before glfw
 
 Renderer::Renderer(int width, int height, const char* title) {
     // Initialize GLFW
@@ -24,26 +25,40 @@ Renderer::Renderer(int width, int height, const char* title) {
     // Make the window's OpenGL context current
     glfwMakeContextCurrent(window);
 
+    // Load OpenGL functions using glad
+    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
+        std::cerr << "Failed to initialize GLAD" << std::endl;
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        exit(EXIT_FAILURE);
+    }
+
+    // Set viewport
+    glViewport(0, 0, width, height);
+
     // Enable V-Sync
     glfwSwapInterval(1);
 
-    // Set the viewport
-    glViewport(0, 0, width, height);
+    // Print success message
+    std::cout << "Renderer initialized successfully." << std::endl;
 }
 
 Renderer::~Renderer() {
     glfwDestroyWindow(window);
     glfwTerminate();
+    std::cout << "Renderer destroyed and resources released." << std::endl;
 }
 
 bool Renderer::shouldClose() {
-    return glfwWindowShouldClose(window); // Use the window member
+    return glfwWindowShouldClose(window);
 }
 
 void Renderer::clear() {
+    // Set a default clear color
+    glClearColor(0.1f, 0.1f, 0.1f, 1.0f); // Dark gray
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 }
 
 void Renderer::swapBuffers() {
-    glfwSwapBuffers(window); // Use the window member
+    glfwSwapBuffers(window);
 }
