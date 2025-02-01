@@ -23,6 +23,15 @@ const int g_maxHeight   = 8;     // Maximum block column height.
 const float playerWidth  = 0.6f;  // Full width of player's collision box.
 const float playerHeight = 1.8f;  // Height of player's collision box.
 
+// Helper function to compute terrain height at a given (x,z) coordinate.
+// This uses the same noise parameters as in world generation.
+int getTerrainHeightAt(int x, int z) {
+    float noiseValue = perlinNoise(x * g_frequency, z * g_frequency);
+    float normalized = (noiseValue + 1.0f) / 2.0f; // Normalize from [-1,1] to [0,1]
+    int height = static_cast<int>(normalized * g_maxHeight);
+    return height;
+}
+
 // Helper function: returns true if a block exists at (bx,by,bz).
 bool isSolidBlock(int bx, int by, int bz) {
     // Outside our world bounds (in x and z) we assume no block exists.
@@ -32,7 +41,7 @@ bool isSolidBlock(int bx, int by, int bz) {
     
     // Compute the block column height at (bx, bz) using Perlin noise.
     float noiseValue = perlinNoise(bx * g_frequency, bz * g_frequency);
-    float normalized = (noiseValue + 1.0f) / 2.0f; // Map from [-1,1] to [0,1]
+    float normalized = (noiseValue + 1.0f) / 2.0f;
     int height = static_cast<int>(normalized * g_maxHeight);
     
     // Blocks exist for y from 0 to height.
@@ -110,7 +119,7 @@ void main()
 )";
 
 int main(int argc, char* argv[]) {
-    // Initialize SDL
+    // Initialize SDL.
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
         std::cerr << "Could not initialize SDL: " 
                   << SDL_GetError() << std::endl;
@@ -208,10 +217,23 @@ int main(int argc, char* argv[]) {
     
     glBindVertexArray(0);
 
-    // Set up the camera (player).
-    // For collision purposes, treat camera.position as the player's feet.
+    // *** Determine a safe spawn position for the player ***
+    // We choose a candidate spawn at (0, 20). Compute the terrain height at that position,
+    // then set the player's feet to be one unit above the top block.
+    int spawnX = 0;
+    int spawnZ = 20;
+    int terrainHeight = getTerrainHeightAt(spawnX, spawnZ);
+    // The player's feet will be at y = terrainHeight + 1.
+    Vec3 spawnPos = { static_cast<float>(spawnX), static_cast<float>(terrainHeight + 1), static_cast<float>(spawnZ) };
+
+    // Optionally, if you want to be extra safe, you could iterate upward until no collision is detected:
+    while (checkCollision(spawnPos)) {
+        spawnPos.y += 0.1f; // Move slightly upward until clear.
+    }
+    
+    // Set up the camera (player). For collision purposes, camera.position represents the player's feet.
     Camera camera;
-    camera.position = { 0.0f, 0.0f, 20.0f }; // Start at y = 0 (feet level).
+    camera.position = spawnPos;
     // The view will be offset by the player's eye height when building the view matrix.
     camera.yaw   = -3.14f / 2;  // Facing toward -Z.
     camera.pitch = 0.0f;
@@ -250,7 +272,6 @@ int main(int argc, char* argv[]) {
             // Jump: check if there's a solid block immediately below the player's feet.
             if (event.type == SDL_KEYDOWN) {
                 if (event.key.keysym.sym == SDLK_SPACE) {
-                    // Check the block directly below (using a small offset).
                     int footX = static_cast<int>(floor(camera.position.x));
                     int footY = static_cast<int>(floor(camera.position.y - 0.1f));
                     int footZ = static_cast<int>(floor(camera.position.z));
@@ -283,9 +304,10 @@ int main(int argc, char* argv[]) {
         Vec3 newPosHoriz = camera.position;
         newPosHoriz.x += horizontalDelta.x;
         newPosHoriz.z += horizontalDelta.z;
-        if (!checkCollision(newPosHoriz))
-            camera.position.x = newPosHoriz.x,
+        if (!checkCollision(newPosHoriz)) {
+            camera.position.x = newPosHoriz.x;
             camera.position.z = newPosHoriz.z;
+        }
         // (If collision occurs, horizontal movement is canceled.)
         
         // Apply gravity to vertical velocity.
@@ -301,8 +323,7 @@ int main(int argc, char* argv[]) {
         }
         
         // Build the view matrix.
-        // Since camera.position represents the player's feet,
-        // add an eye offset so that the camera view is from roughly 1.6 units above the feet.
+        // Since camera.position represents the player's feet, add an eye offset so that the view is from roughly 1.6 units above the feet.
         Vec3 eyePosition = camera.position;
         eyePosition.y += 1.6f;
         Vec3 viewDirection = {
