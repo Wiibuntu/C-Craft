@@ -7,12 +7,13 @@
 #include "cube.h"
 #include "camera.h"
 #include "texture.h"
+#include "noise.h"  // Include the Perlin noise module
 
 // Screen dimensions
 const int SCREEN_WIDTH = 800;
 const int SCREEN_HEIGHT = 600;
 
-// Updated vertex shader: passes texture coordinates to the fragment shader.
+// Vertex shader: passes position and texture coordinates.
 const char* vertexShaderSource = R"(
 #version 330 core
 layout(location = 0) in vec3 aPos;
@@ -26,7 +27,7 @@ void main()
 }
 )";
 
-// Updated fragment shader: samples from a texture.
+// Fragment shader: samples from a texture.
 const char* fragmentShaderSource = R"(
 #version 330 core
 in vec2 TexCoord;
@@ -84,7 +85,7 @@ int main(int argc, char* argv[]) {
         return -1;
     }
     
-    // Enable vsync to help with stable timing
+    // Enable vsync for stable timing
     if (SDL_GL_SetSwapInterval(1) < 0) {
         std::cerr << "Warning: Unable to set VSync! SDL Error: " << SDL_GetError() << std::endl;
     }
@@ -94,7 +95,7 @@ int main(int argc, char* argv[]) {
     // Build and compile shader program
     GLuint shaderProgram = createShaderProgram(vertexShaderSource, fragmentShaderSource);
 
-    // Load texture (make sure "texture.png" is in your project directory)
+    // Load texture (place a file named "texture.png" in your project directory)
     GLuint textureID = loadTexture("texture.png");
     if (textureID == 0) {
         std::cerr << "Texture failed to load!" << std::endl;
@@ -104,15 +105,24 @@ int main(int argc, char* argv[]) {
         return -1;
     }
     
-    // Generate world geometry: create a flat terrain.
-    // For debugging, we're using a 32x32 grid of cubes.
-    // Once stable, you can change this value to 64 for a larger world.
+    // Generate world geometry using Perlin noise.
+    // For each (x, z) position in a grid, compute a height and add a column of cubes.
     std::vector<float> worldVertices;
-    int worldSize = 32; // Change to 64 after verifying stability.
+    int worldSize = 64;       // The grid size (world extends from -32 to +31 in x and z)
+    float frequency = 0.1f;   // Frequency of the noise (adjust for smoother or more rugged terrain)
+    int maxHeight = 8;        // Maximum column height (in blocks)
+    
     for (int x = -worldSize/2; x < worldSize/2; ++x) {
         for (int z = -worldSize/2; z < worldSize/2; ++z) {
-            // Each cube is 1 unit high; place them at y = 0.
-            addCube(worldVertices, static_cast<float>(x), 0.0f, static_cast<float>(z));
+            // Compute noise value at this (x, z) location.
+            float noiseValue = perlinNoise(x * frequency, z * frequency);
+            // Normalize noise value from [-1, 1] to [0, 1].
+            float normalized = (noiseValue + 1.0f) / 2.0f;
+            int height = static_cast<int>(normalized * maxHeight);
+            // Create a column of cubes from y = 0 up to the computed height.
+            for (int y = 0; y <= height; ++y) {
+                addCube(worldVertices, static_cast<float>(x), static_cast<float>(y), static_cast<float>(z));
+            }
         }
     }
     

@@ -31,6 +31,10 @@ GLuint loadTexture(const char* filename) {
     glGenTextures(1, &textureID);
     glBindTexture(GL_TEXTURE_2D, textureID);
     
+    // **Fix for incorrect colors:**
+    // Set the pixel unpack alignment to 1 to avoid issues with non-4-byte-aligned rows.
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    
     // Set texture wrapping/filtering options
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);	
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
