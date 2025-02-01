@@ -1,25 +1,24 @@
-all: minecraft_clone
+# Makefile for the textured voxel engine
 
-minecraft_clone: Main.o Game.o World.o Block.o Renderer.o Player.o
-	g++ Main.o Game.o World.o Block.o Renderer.o Player.o -o minecraft_clone -lglfw -lGL
+CXX      = g++
+CXXFLAGS = -std=c++11 -Wall -I.
+LDFLAGS  = -lSDL2 -lGLEW -lGL
 
-Main.o: Main.cpp
-	g++ -c Main.cpp
+# List all source files
+SRCS = main.cpp math.cpp shader.cpp cube.cpp texture.cpp noise.cpp
+OBJS = $(SRCS:.cpp=.o)
 
-Game.o: Game.cpp
-	g++ -c Game.cpp
+TARGET = voxel_engine
 
-World.o: World.cpp
-	g++ -c World.cpp
+all: $(TARGET)
 
-Block.o: Block.cpp
-	g++ -c Block.cpp
+$(TARGET): $(OBJS)
+	$(CXX) $(CXXFLAGS) -o $(TARGET) $(OBJS) $(LDFLAGS)
 
-Renderer.o: Renderer.cpp
-	g++ -c Renderer.cpp
-
-Player.o: Player.cpp
-	g++ -c Player.cpp
+%.o: %.cpp
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 clean:
-	rm -f *.o minecraft_clone
+	rm -f $(OBJS) $(TARGET)
+
+.PHONY: all clean
