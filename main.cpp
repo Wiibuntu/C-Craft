@@ -1,3 +1,4 @@
+// main.cpp
 #include <SDL2/SDL.h>
 #include <GL/glew.h>
 #include <iostream>
@@ -7,45 +8,49 @@
 #include <utility>
 #include "math.h"
 #include "shader.h"
-#include "cube.h"
+#include "cube.h"      // Contains BlockType enum and addCube(...)
 #include "camera.h"
 #include "texture.h"
-#include "noise.h"  // Now provides both perlinNoise and fbmNoise
+#include "noise.h"     // Provides perlinNoise and fbmNoise
 
 // Screen dimensions
 const int SCREEN_WIDTH = 800;
 const int SCREEN_HEIGHT = 600;
 
 // Global parameters for terrain generation
-const int g_maxHeight = 12;  // Maximum terrain height (in blocks)
+const int g_maxHeight = 12;  // Maximum terrain height in blocks
 
-// Parameters for chunk-based world generation
-const int chunkSize = 16;     // Each chunk is 16x16 blocks in x/z
-const int renderDistance = 5; // In chunks (i.e. load chunks within +/- 5 chunks of the player)
+// Chunk parameters
+const int chunkSize = 16;     // Each chunk is 16 x 16 blocks in x/z
+const int renderDistance = 5; // Number of chunks to load in each direction from the player
 
 // Player collision dimensions (in world units)
 const float playerWidth  = 0.6f;
 const float playerHeight = 1.8f;
 
-// --- Helper functions for terrain and collision ---
-// Use fbmNoise for more variety. (Adjust parameters as desired.)
+// --- Helper Functions ---
+
+// Use fbmNoise for more variety in terrain.
 int getTerrainHeightAt(int x, int z) {
-    // Multiply coordinates by a small factor to "zoom out"
+    // Adjust the scale (0.01f) as desired for zooming the noise.
     float noiseValue = fbmNoise(x * 0.01f, z * 0.01f, 6, 2.0f, 0.5f);
-    float normalized = (noiseValue + 1.0f) / 2.0f;  // Map to [0,1]
+    float normalized = (noiseValue + 1.0f) / 2.0f;  // Map noise from [-1,1] to [0,1]
     int height = static_cast<int>(normalized * g_maxHeight);
     return height;
 }
 
+// For collision and world generation, we assume that a block exists at (bx,by,bz)
+// if by is between 0 and the terrain height at (bx, bz).
 bool isSolidBlock(int bx, int by, int bz) {
-    // For simplicity, assume blocks exist from y = 0 up to terrain height.
     int terrainHeight = getTerrainHeightAt(bx, bz);
     return (by >= 0 && by <= terrainHeight);
 }
 
+// Check collision of the player's axis-aligned bounding box (AABB).
+// The player's position is defined as the feet (bottom center) of the player.
 bool checkCollision(const Vec3 & pos) {
     float half = playerWidth / 2.0f;
-    // The player's AABB (using pos as feet position)
+    // Compute AABB bounds
     float minX = pos.x - half;
     float maxX = pos.x + half;
     float minY = pos.y;
@@ -64,10 +69,10 @@ bool checkCollision(const Vec3 & pos) {
         for (int by = startY; by <= endY; by++) {
             for (int bz = startZ; bz <= endZ; bz++) {
                 if (isSolidBlock(bx, by, bz)) {
-                    // Block AABB is from (bx,by,bz) to (bx+1,by+1,bz+1)
-                    if (maxX > bx && minX < bx+1 &&
-                        maxY > by && minY < by+1 &&
-                        maxZ > bz && minZ < bz+1)
+                    // Each block occupies [bx, bx+1] x [by, by+1] x [bz, bz+1]
+                    if (maxX > bx && minX < bx + 1 &&
+                        maxY > by && minY < by + 1 &&
+                        maxZ > bz && minZ < bz + 1)
                         return true;
                 }
             }
@@ -76,52 +81,69 @@ bool checkCollision(const Vec3 & pos) {
     return false;
 }
 
-// --- Chunk system ---
-// Define a simple structure to hold chunk data.
+// --- Chunk System ---
+
+// Define a structure to hold chunk data.
 struct Chunk {
-    int chunkX, chunkZ;          // Chunk coordinates
-    std::vector<float> vertices; // Geometry data (each vertex: 5 floats: 3 position, 2 tex coords)
-    GLuint VAO, VBO;
+    int chunkX, chunkZ;          // Chunk coordinates (in chunk units)
+    std::vector<float> vertices; // Vertex data for this chunk (each vertex: 5 floats)
+    GLuint VAO, VBO;             // OpenGL buffers for rendering the chunk
 };
 
-// A global map that stores generated chunks keyed by (chunkX, chunkZ)
+// Global container to store generated chunks. The key is a pair (chunkX, chunkZ).
 std::map<std::pair<int, int>, Chunk> chunks;
 
-// Generate geometry for a given chunk.
+// Generate geometry for a given chunk at chunk coordinates (chunkX, chunkZ).
 Chunk generateChunk(int chunkX, int chunkZ) {
     Chunk chunk;
     chunk.chunkX = chunkX;
     chunk.chunkZ = chunkZ;
     chunk.vertices.clear();
     
-    // For each block position in this chunk:
+    // Loop over local coordinates within the chunk.
     for (int localX = 0; localX < chunkSize; localX++) {
         for (int localZ = 0; localZ < chunkSize; localZ++) {
+            // Convert local coordinates to world coordinates.
             int worldX = chunkX * chunkSize + localX;
             int worldZ = chunkZ * chunkSize + localZ;
             int height = getTerrainHeightAt(worldX, worldZ);
+            // For each column, choose block type based on height.
             for (int y = 0; y <= height; y++) {
-                addCube(chunk.vertices, static_cast<float>(worldX), static_cast<float>(y), static_cast<float>(worldZ));
+                BlockType type;
+                if (y == height) {
+                    type = BLOCK_GRASS;  // Top block is grass.
+                } else if ((height - y) <= 6) {
+                    type = BLOCK_DIRT;   // Next 6 layers: dirt.
+                } else {
+                    type = BLOCK_STONE;  // Deeper layers: stone.
+                }
+                addCube(chunk.vertices, static_cast<float>(worldX),
+                        static_cast<float>(y),
+                        static_cast<float>(worldZ), type);
             }
         }
     }
     
-    // Create OpenGL buffers for the chunk.
+    // Create VAO and VBO for this chunk.
     glGenVertexArrays(1, &chunk.VAO);
     glGenBuffers(1, &chunk.VBO);
     glBindVertexArray(chunk.VAO);
     glBindBuffer(GL_ARRAY_BUFFER, chunk.VBO);
-    glBufferData(GL_ARRAY_BUFFER, chunk.vertices.size() * sizeof(float), chunk.vertices.data(), GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, chunk.vertices.size() * sizeof(float),
+                 chunk.vertices.data(), GL_STATIC_DRAW);
+    // Each vertex: 3 floats position, 2 floats UV.
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float),
+                          (void*)(3 * sizeof(float)));
     glEnableVertexAttribArray(1);
     glBindVertexArray(0);
     
     return chunk;
 }
 
-// --- Shaders (same as before) ---
+// --- Shaders ---
+// (Same as before – make sure your shader sources match your texture atlas usage.)
 const char* vertexShaderSource = R"(
 #version 330 core
 layout(location = 0) in vec3 aPos;
@@ -147,7 +169,7 @@ void main()
 )";
 
 int main(int argc, char* argv[]) {
-    // SDL and OpenGL initialization (same as before)...
+    // --- Initialize SDL and OpenGL ---
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
         std::cerr << "SDL_Init Error: " << SDL_GetError() << std::endl;
         return -1;
@@ -156,8 +178,11 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
     
-    SDL_Window* window = SDL_CreateWindow("Infinite Voxel Engine", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                          SCREEN_WIDTH, SCREEN_HEIGHT, SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN);
+    SDL_Window* window = SDL_CreateWindow("Infinite Voxel Engine",
+                                          SDL_WINDOWPOS_CENTERED,
+                                          SDL_WINDOWPOS_CENTERED,
+                                          SCREEN_WIDTH, SCREEN_HEIGHT,
+                                          SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN);
     if (!window) {
         std::cerr << "SDL_CreateWindow Error: " << SDL_GetError() << std::endl;
         SDL_Quit();
@@ -196,26 +221,25 @@ int main(int argc, char* argv[]) {
     }
     
     // --- Determine a safe spawn position ---
-    // For example, choose (0,?) and use getTerrainHeightAt.
+    // For example, use (0,0) in world coordinates.
     int spawnX = 0;
     int spawnZ = 0;
     int terrainHeight = getTerrainHeightAt(spawnX, spawnZ);
+    // Place player's feet 1 unit above the terrain.
     Vec3 spawnPos = { static_cast<float>(spawnX), static_cast<float>(terrainHeight + 1), static_cast<float>(spawnZ) };
-    while (checkCollision(spawnPos)) {
+    while (checkCollision(spawnPos))
         spawnPos.y += 0.1f;
-    }
     
-    // Set up the camera (player) with the spawn position.
+    // Set up the camera (player). Note: camera.position is the player's feet.
     Camera camera;
     camera.position = spawnPos;
-    camera.yaw   = -3.14f / 2;  // Facing -Z.
+    camera.yaw   = -3.14f / 2;  // Facing -Z
     camera.pitch = 0.0f;
     
     float verticalVelocity = 0.0f;
     const float gravity = -9.81f;
     const float jumpSpeed = 5.0f;
     
-    // Set mouse to relative mode for FPS-style control.
     SDL_SetRelativeMouseMode(SDL_TRUE);
     
     Uint32 lastTime = SDL_GetTicks();
@@ -243,7 +267,6 @@ int main(int argc, char* argv[]) {
             }
             if (event.type == SDL_KEYDOWN) {
                 if (event.key.keysym.sym == SDLK_SPACE) {
-                    // Check if there is a block immediately below the player's feet.
                     int footX = static_cast<int>(floor(camera.position.x));
                     int footY = static_cast<int>(floor(camera.position.y - 0.1f));
                     int footZ = static_cast<int>(floor(camera.position.z));
@@ -269,6 +292,7 @@ int main(int argc, char* argv[]) {
         if (keystate[SDL_SCANCODE_D])
             horizontalDelta = add(horizontalDelta, multiply(moveRight, speed));
         
+        // Attempt horizontal movement.
         Vec3 newPosHoriz = camera.position;
         newPosHoriz.x += horizontalDelta.x;
         newPosHoriz.z += horizontalDelta.z;
@@ -277,6 +301,7 @@ int main(int argc, char* argv[]) {
             camera.position.z = newPosHoriz.z;
         }
         
+        // Apply gravity and vertical movement.
         verticalVelocity += gravity * deltaTime;
         float verticalDelta = verticalVelocity * deltaTime;
         Vec3 newPosVert = camera.position;
@@ -287,14 +312,14 @@ int main(int argc, char* argv[]) {
             verticalVelocity = 0;
         
         // --- Chunk Management ---
-        // Determine which chunks to load based on the player's current chunk.
+        // Determine player's current chunk coordinates.
         int playerChunkX = static_cast<int>(floor(camera.position.x / chunkSize));
         int playerChunkZ = static_cast<int>(floor(camera.position.z / chunkSize));
+        // Generate chunks within render distance.
         for (int cx = playerChunkX - renderDistance; cx <= playerChunkX + renderDistance; cx++) {
             for (int cz = playerChunkZ - renderDistance; cz <= playerChunkZ + renderDistance; cz++) {
-                std::pair<int,int> key = {cx, cz};
+                std::pair<int, int> key = {cx, cz};
                 if (chunks.find(key) == chunks.end()) {
-                    // Generate and store the chunk.
                     Chunk chunk = generateChunk(cx, cz);
                     chunks.insert({key, chunk});
                 }
@@ -302,7 +327,7 @@ int main(int argc, char* argv[]) {
         }
         
         // --- Rendering ---
-        glClearColor(0.53f, 0.81f, 0.92f, 1.0f);
+        glClearColor(0.53f, 0.81f, 0.92f, 1.0f); // Sky-blue background.
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glUseProgram(shaderProgram);
         glActiveTexture(GL_TEXTURE0);
@@ -310,26 +335,29 @@ int main(int argc, char* argv[]) {
         GLint texUniformLoc = glGetUniformLocation(shaderProgram, "ourTexture");
         glUniform1i(texUniformLoc, 0);
         
-        // Build the view-projection matrix.
+        // Build view-projection matrix.
+        // The eye position is offset upward (e.g., 1.6 units) from the player's feet.
         Vec3 eyePosition = camera.position;
-        eyePosition.y += 1.6f;  // Eye level offset.
+        eyePosition.y += 1.6f;
         Vec3 viewDirection = { cos(camera.yaw) * cos(camera.pitch),
                                sin(camera.pitch),
                                sin(camera.yaw) * cos(camera.pitch) };
         Vec3 cameraTarget = add(eyePosition, viewDirection);
         Mat4 view = lookAtMatrix(eyePosition, cameraTarget, {0, 1, 0});
-        Mat4 projection = perspectiveMatrix(45.0f * 3.1415926f/180.0f, (float)SCREEN_WIDTH/SCREEN_HEIGHT, 0.1f, 100.0f);
+        Mat4 projection = perspectiveMatrix(45.0f * 3.1415926f / 180.0f,
+                                             static_cast<float>(SCREEN_WIDTH) / SCREEN_HEIGHT,
+                                             0.1f, 100.0f);
         Mat4 pv = multiplyMatrix(projection, view);
         
         // Render each chunk within render distance.
         for (const auto &pair : chunks) {
             int cx = pair.first.first;
             int cz = pair.first.second;
-            // Optionally, only render if within render distance.
-            if (abs(cx - playerChunkX) > renderDistance || abs(cz - playerChunkZ) > renderDistance)
+            if (abs(cx - playerChunkX) > renderDistance ||
+                abs(cz - playerChunkZ) > renderDistance)
                 continue;
             const Chunk &chunk = pair.second;
-            // Model matrix for each chunk is identity since geometry is generated in world coordinates.
+            // Since vertices are generated in world coordinates, model is identity.
             Mat4 mvp = multiplyMatrix(pv, identityMatrix());
             GLint mvpLoc = glGetUniformLocation(shaderProgram, "MVP");
             glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, mvp.m);
@@ -341,7 +369,8 @@ int main(int argc, char* argv[]) {
         SDL_GL_SwapWindow(window);
     }
     
-    // Cleanup: (Here you would also delete each chunk's VAO/VBO in a complete implementation)
+    // --- Cleanup ---
+    // (For a full implementation, also delete each chunk's VAO/VBO)
     glDeleteProgram(shaderProgram);
     SDL_GL_DeleteContext(glContext);
     SDL_DestroyWindow(window);
