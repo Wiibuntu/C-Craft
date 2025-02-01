@@ -5,7 +5,7 @@ CXXFLAGS = -std=c++11 -Wall -I.
 LDFLAGS  = -lSDL2 -lGLEW -lGL
 
 # List all source files
-SRCS = main.cpp math.cpp shader.cpp cube.cpp texture.cpp
+SRCS = main.cpp math.cpp shader.cpp cube.cpp texture.cpp noise.cpp
 OBJS = $(SRCS:.cpp=.o)
 
 TARGET = voxel_engine
