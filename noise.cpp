@@ -1,6 +1,7 @@
 #include "noise.h"
 #include <cmath>
 
+// --- Perlin Noise Implementation ---
 // Classic permutation array
 static int permutation[256] = {
     151,160,137,91,90,15,131,13,201,95,96,53,194,233,7,225,
@@ -44,18 +45,15 @@ static float lerp(float t, float a, float b) {
 }
 
 static float grad(int hash, float x, float y, float z) {
-    // Convert lower 4 bits of hash code into 12 gradient directions.
     int h = hash & 15;
     float u = h < 8 ? x : y;
-    float v = h < 4 ? y : (h == 12 || h == 14 ? x : z);
-    return ((h & 1) == 0 ? u : -u) + ((h & 2) == 0 ? v : -v);
+    float v = h < 4 ? y : (h==12 || h==14 ? x : z);
+    return ((h & 1) ? -u : u) + ((h & 2) ? -v : v);
 }
 
 float perlinNoise(float x, float y) {
     initPermutation();
-    // We'll use 3D noise with z fixed to 0.
-    float z = 0.0f;
-    
+    float z = 0.0f; // 2D noise with z = 0
     int X = static_cast<int>(floor(x)) & 255;
     int Y = static_cast<int>(floor(y)) & 255;
     int Z = static_cast<int>(floor(z)) & 255;
@@ -68,12 +66,8 @@ float perlinNoise(float x, float y) {
     float v = fade(y);
     float w = fade(z);
     
-    int A  = p[X] + Y;
-    int AA = p[A] + Z;
-    int AB = p[A + 1] + Z;
-    int B  = p[X + 1] + Y;
-    int BA = p[B] + Z;
-    int BB = p[B + 1] + Z;
+    int A  = p[X] + Y,  AA = p[A] + Z, AB = p[A + 1] + Z;
+    int B  = p[X + 1] + Y, BA = p[B] + Z, BB = p[B + 1] + Z;
     
     float res = lerp(w, 
                 lerp(v, lerp(u, grad(p[AA], x, y, z),
@@ -85,4 +79,18 @@ float perlinNoise(float x, float y) {
                         lerp(u, grad(p[AB + 1], x, y - 1, z - 1),
                                grad(p[BB + 1], x - 1, y - 1, z - 1))));
     return res;
+}
+
+float fbmNoise(float x, float y, int octaves, float lacunarity, float gain) {
+    float amplitude = 1.0f;
+    float frequency = 1.0f;
+    float sum = 0.0f;
+    float maxValue = 0.0f;
+    for (int i = 0; i < octaves; ++i) {
+        sum += perlinNoise(x * frequency, y * frequency) * amplitude;
+        maxValue += amplitude;
+        amplitude *= gain;
+        frequency *= lacunarity;
+    }
+    return sum / maxValue; // Normalize to roughly [-1,1]
 }
