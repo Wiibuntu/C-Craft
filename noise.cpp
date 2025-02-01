@@ -51,7 +51,7 @@ static float grad(int hash, float x, float y, float z) {
 
 float perlinNoise(float x, float y) {
     initPermutation();
-    float z = 0.0f;
+    float z = 0.0f; // 2D noise with z fixed
     int X = static_cast<int>(floor(x)) & 255;
     int Y = static_cast<int>(floor(y)) & 255;
     int Z = static_cast<int>(floor(z)) & 255;

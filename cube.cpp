@@ -1,12 +1,13 @@
 #include "cube.h"
 #include <cstdlib>  // for rand()
-#include <cmath>
+#include <vector>
 
-// Assume a 16x16 texture atlas.
+// We assume a texture atlas that is 16x16 tiles.
 const float tileSize = 1.0f / 16.0f;
 
 // Define tile coordinates (in grid units) for each block texture.
-
+// (Coordinates are given as (tileX, tileY) with (0,0) at bottom-left.)
+  
 // Grass block:
 const float grassTopTileX    = 0.0f, grassTopTileY    = 15.0f;
 const float grassSideTileX   = 1.0f, grassSideTileY   = 15.0f;
@@ -26,6 +27,9 @@ const float sandTileX = 3.0f, sandTileY = 14.0f;
 const float treeLogTopTileX = 4.0f, treeLogTopTileY = 14.0f;
 const float treeLogSideTileX = 5.0f, treeLogSideTileY = 14.0f;
 
+// Tree leaves block:
+const float leavesTileX = 6.0f, leavesTileY = 14.0f;
+
 // Helper function to compute UV coordinates for a given tile.
 // Returns UVs for the four corners: lower-left, lower-right, upper-right, upper-left.
 void getTileUV(float tileX, float tileY, float uv[4][2]) {
@@ -39,13 +43,13 @@ void getTileUV(float tileX, float tileY, float uv[4][2]) {
 void addCube(std::vector<float>& vertices, float x, float y, float z, BlockType blockType) {
     float uvTop[4][2], uvSide[4][2], uvBottom[4][2];
     
-    // Choose the correct texture tiles based on block type.
+    // Select the UV coordinates based on the block type.
     if (blockType == BLOCK_GRASS) {
         getTileUV(grassTopTileX, grassTopTileY, uvTop);
         getTileUV(grassSideTileX, grassSideTileY, uvSide);
         getTileUV(grassBottomTileX, grassBottomTileY, uvBottom);
     } else if (blockType == BLOCK_DIRT) {
-        // Randomly choose one of the two dirt variants.
+        // Randomly choose one of two dirt variants.
         int variant = rand() % 2;
         if (variant == 0) {
             getTileUV(dirtTile1X, dirtTile1Y, uvTop);
@@ -65,10 +69,15 @@ void addCube(std::vector<float>& vertices, float x, float y, float z, BlockType 
         getTileUV(sandTileX, sandTileY, uvSide);
         getTileUV(sandTileX, sandTileY, uvBottom);
     } else if (blockType == BLOCK_TREE_LOG) {
-        // Tree logs: use one tile for top/bottom and one for the sides.
+        // Tree logs: top and bottom use one tile; sides use another.
         getTileUV(treeLogTopTileX, treeLogTopTileY, uvTop);
         getTileUV(treeLogSideTileX, treeLogSideTileY, uvSide);
         getTileUV(treeLogTopTileX, treeLogTopTileY, uvBottom);
+    } else if (blockType == BLOCK_LEAVES) {
+        // Leaves: use the same tile for all faces.
+        getTileUV(leavesTileX, leavesTileY, uvTop);
+        getTileUV(leavesTileX, leavesTileY, uvSide);
+        getTileUV(leavesTileX, leavesTileY, uvBottom);
     }
     
     // Define the eight corners of the cube.
@@ -76,8 +85,9 @@ void addCube(std::vector<float>& vertices, float x, float y, float z, BlockType 
     float y0 = y,     y1 = y + 1;
     float z0 = z,     z1 = z + 1;
     
-    // Add vertices for each face (two triangles per face).
-    // Each vertex: position (x,y,z) followed by UV (u,v).
+    // For brevity, we add faces in this order:
+    // Front, Back, Left, Right, Top, Bottom.
+    // Each face is two triangles (6 vertices) with 5 floats each.
     
     // Front face (z = z1) uses the side texture.
     {

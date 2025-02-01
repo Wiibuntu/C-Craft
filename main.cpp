@@ -5,11 +5,12 @@
 #include <vector>
 #include <cmath>
 #include <map>
+#include <tuple>
 #include <utility>
 #include <cstdlib>  // for rand()
 #include "math.h"
 #include "shader.h"
-#include "cube.h"      // Must now define: BLOCK_GRASS, BLOCK_DIRT, BLOCK_STONE, BLOCK_SAND, BLOCK_TREE_LOG
+#include "cube.h"      // Updated: defines BlockType {BLOCK_GRASS, BLOCK_DIRT, BLOCK_STONE, BLOCK_SAND, BLOCK_TREE_LOG, BLOCK_LEAVES}
 #include "camera.h"
 #include "texture.h"
 #include "noise.h"     // Provides perlinNoise() and fbmNoise()
@@ -22,7 +23,7 @@ const int SCREEN_HEIGHT = 600;
 const int g_maxHeight = 12;  // Maximum terrain height (in blocks)
 
 // Chunk parameters
-const int chunkSize = 16;     // Each chunk is 16x16 blocks in x/z
+const int chunkSize = 16;     // Each chunk is 16x16 blocks (x/z)
 const int renderDistance = 5; // In chunks
 
 // Player collision dimensions (in world units)
@@ -30,44 +31,48 @@ const float playerWidth  = 0.6f;
 const float playerHeight = 1.8f;
 
 // --- Biome Definitions ---
-enum Biome { BIOME_PLAINS, BIOME_DESERT, BIOME_EXTREME_HILLS };
+enum Biome { BIOME_PLAINS, BIOME_DESERT, BIOME_EXTREME_HILLS, BIOME_FOREST };
 
-// Determine the biome at (x,z) using low-frequency Perlin noise.
+// Determine the biome at (x,z) using a very low-frequency Perlin noise value.
 Biome getBiome(int x, int z) {
-    // Use a very low frequency so that biomes change gradually.
     float n = perlinNoise(x * 0.001f, z * 0.001f);
-    if (n < -0.33f)
+    // Example thresholds:
+    if (n < -0.5f)
         return BIOME_DESERT;
-    else if (n > 0.33f)
+    else if (n > 0.5f)
         return BIOME_EXTREME_HILLS;
+    else if (n >= -0.2f && n <= 0.2f)
+        return BIOME_FOREST;
     else
         return BIOME_PLAINS;
 }
 
-// --- Terrain Height Function ---
-// Returns the terrain height at (x,z), using different noise scales for extreme hills.
-int getTerrainHeightAt(int x, int z) {
-    Biome biome = getBiome(x, z);
-    float noiseValue;
-    if (biome == BIOME_EXTREME_HILLS) {
-        // Use a different scale to generate steeper terrain.
-        noiseValue = fbmNoise(x * 0.005f, z * 0.005f, 6, 2.0f, 0.5f);
-    } else {
-        noiseValue = fbmNoise(x * 0.01f, z * 0.01f, 6, 2.0f, 0.5f);
-    }
-    float normalized = (noiseValue + 1.0f) / 2.0f;  // Map to [0,1]
-    int height = static_cast<int>(normalized * g_maxHeight);
-    return height;
+// --- Global Extra Blocks for Collision ---
+// For blocks not part of the terrain height (e.g., trees)
+std::map<std::tuple<int,int,int>, BlockType> extraBlocks;
+
+// Helper: Return true if the block type should have collision.
+bool blockHasCollision(BlockType type) {
+    // Let leaves be non-solid (the player can move through them).
+    return (type != BLOCK_LEAVES);
 }
 
 // --- Collision Function ---
-// A block exists at (bx,by,bz) if by is between 0 and the terrain height.
+// Check if a block exists at (bx,by,bz) either as part of the procedural terrain or
+// in the extraBlocks map (for trees, etc.).
 bool isSolidBlock(int bx, int by, int bz) {
+    std::tuple<int,int,int> key(bx, by, bz);
+    if (extraBlocks.find(key) != extraBlocks.end()) {
+        BlockType type = extraBlocks[key];
+        if (blockHasCollision(type))
+            return true;
+    }
+    // For terrain, assume blocks exist from y = 0 up to the terrain height.
     int terrainHeight = getTerrainHeightAt(bx, bz);
     return (by >= 0 && by <= terrainHeight);
 }
 
-// Check collision for the player's axis-aligned bounding box (AABB).
+// --- Collision Check for the Player ---
 // The player's position represents the feet (bottom center).
 bool checkCollision(const Vec3 & pos) {
     float half = playerWidth / 2.0f;
@@ -100,6 +105,21 @@ bool checkCollision(const Vec3 & pos) {
     return false;
 }
 
+// --- Terrain Height Function ---
+// Returns the terrain height at (x,z) based on biome and noise.
+int getTerrainHeightAt(int x, int z) {
+    Biome biome = getBiome(x, z);
+    float noiseValue;
+    if (biome == BIOME_EXTREME_HILLS) {
+        noiseValue = fbmNoise(x * 0.005f, z * 0.005f, 6, 2.0f, 0.5f);
+    } else {
+        noiseValue = fbmNoise(x * 0.01f, z * 0.01f, 6, 2.0f, 0.5f);
+    }
+    float normalized = (noiseValue + 1.0f) / 2.0f;
+    int height = static_cast<int>(normalized * g_maxHeight);
+    return height;
+}
+
 // --- Chunk System ---
 struct Chunk {
     int chunkX, chunkZ;          // Chunk coordinates (in chunk units)
@@ -107,17 +127,16 @@ struct Chunk {
     GLuint VAO, VBO;
 };
 
-// Global container for chunks, keyed by (chunkX, chunkZ)
 std::map<std::pair<int, int>, Chunk> chunks;
 
-// Generate a chunk at chunk coordinates (chunkX, chunkZ)
+// Generate geometry for a given chunk at (chunkX, chunkZ)
 Chunk generateChunk(int chunkX, int chunkZ) {
     Chunk chunk;
     chunk.chunkX = chunkX;
     chunk.chunkZ = chunkZ;
     chunk.vertices.clear();
     
-    // Loop over local coordinates within the chunk.
+    // Loop over local positions within the chunk.
     for (int localX = 0; localX < chunkSize; localX++) {
         for (int localZ = 0; localZ < chunkSize; localZ++) {
             int worldX = chunkX * chunkSize + localX;
@@ -125,16 +144,17 @@ Chunk generateChunk(int chunkX, int chunkZ) {
             Biome biome = getBiome(worldX, worldZ);
             int height = getTerrainHeightAt(worldX, worldZ);
             
-            // Generate terrain column.
+            // --- Terrain Generation ---
+            // For non-desert biomes, use grass on top, then dirt (up to 6 layers), then stone.
+            // For desert, the top two layers are sand; below that, stone.
             for (int y = 0; y <= height; y++) {
                 BlockType type;
                 if (biome == BIOME_DESERT) {
-                    // In desert, the top 2 layers are sand.
                     if (y >= height - 1)
                         type = BLOCK_SAND;
                     else
                         type = BLOCK_STONE;
-                } else {  // Plains or Extreme Hills
+                } else { // For Plains, Extreme Hills, and Forest
                     if (y == height)
                         type = BLOCK_GRASS;
                     else if ((height - y) <= 6)
@@ -148,16 +168,36 @@ Chunk generateChunk(int chunkX, int chunkZ) {
             }
             
             // --- Tree Generation ---
-            // Only generate trees in non-desert biomes.
-            if (biome == BIOME_PLAINS || biome == BIOME_EXTREME_HILLS) {
-                // Random chance: about 1 in 30 columns get a tree.
-                if (rand() % 30 == 0) {
-                    int trunkHeight = 4 + (rand() % 3);  // Tree trunk height between 4 and 6.
+            // Only generate trees in forest biome.
+            if (biome == BIOME_FOREST) {
+                // Use a lower chance (e.g., 1 in 50).
+                if (rand() % 50 == 0) {
+                    int trunkHeight = 4 + (rand() % 3);  // 4 to 6 blocks tall
+                    // Generate trunk (tree logs)
                     for (int ty = height + 1; ty <= height + trunkHeight; ty++) {
                         addCube(chunk.vertices, static_cast<float>(worldX),
                                 static_cast<float>(ty),
                                 static_cast<float>(worldZ), BLOCK_TREE_LOG);
+                        extraBlocks[std::make_tuple(worldX, ty, worldZ)] = BLOCK_TREE_LOG;
                     }
+                    // Generate leaves around the top of the trunk.
+                    int topY = height + trunkHeight;
+                    // Create a 3x3 layer around the trunk (excluding the trunk itself)
+                    for (int lx = worldX - 1; lx <= worldX + 1; lx++) {
+                        for (int lz = worldZ - 1; lz <= worldZ + 1; lz++) {
+                            if (lx == worldX && lz == worldZ)
+                                continue; // skip trunk position
+                            addCube(chunk.vertices, static_cast<float>(lx),
+                                    static_cast<float>(topY),
+                                    static_cast<float>(lz), BLOCK_LEAVES);
+                            extraBlocks[std::make_tuple(lx, topY, lz)] = BLOCK_LEAVES;
+                        }
+                    }
+                    // Optionally add a crown block one level higher at the center.
+                    addCube(chunk.vertices, static_cast<float>(worldX),
+                            static_cast<float>(topY + 1),
+                            static_cast<float>(worldZ), BLOCK_LEAVES);
+                    extraBlocks[std::make_tuple(worldX, topY + 1, worldZ)] = BLOCK_LEAVES;
                 }
             }
         }
@@ -192,7 +232,7 @@ void main()
     TexCoord = aTexCoord;
 }
 )";
-
+ 
 const char* fragmentShaderSource = R"(
 #version 330 core
 in vec2 TexCoord;
@@ -204,8 +244,9 @@ void main()
 }
 )";
 
+// --- Main Function ---
 int main(int argc, char* argv[]) {
-    // --- Initialize SDL and OpenGL ---
+    // Initialize SDL and create OpenGL context.
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
         std::cerr << "SDL_Init Error: " << SDL_GetError() << std::endl;
         return -1;
@@ -238,9 +279,9 @@ int main(int argc, char* argv[]) {
         SDL_Quit();
         return -1;
     }
-    if (SDL_GL_SetSwapInterval(1) < 0) {
+    if (SDL_GL_SetSwapInterval(1) < 0)
         std::cerr << "Warning: Unable to set VSync! SDL Error: " << SDL_GetError() << std::endl;
-    }
+    
     glEnable(GL_DEPTH_TEST);
     
     GLuint shaderProgram = createShaderProgram(vertexShaderSource, fragmentShaderSource);
@@ -254,19 +295,17 @@ int main(int argc, char* argv[]) {
     }
     
     // --- Determine a Safe Spawn Position ---
-    // For example, spawn at (0,0) in world coordinates.
-    int spawnX = 0;
-    int spawnZ = 0;
+    // For example, choose world coordinates (0,0).
+    int spawnX = 0, spawnZ = 0;
     int terrainHeight = getTerrainHeightAt(spawnX, spawnZ);
-    // Place the player's feet several units above the terrain so they fall in.
-    float spawnHeightOffset = 3.0f;
+    float spawnHeightOffset = 3.0f;  // Spawn a few units above the terrain.
     Vec3 spawnPos = { static_cast<float>(spawnX),
                       static_cast<float>(terrainHeight) + spawnHeightOffset,
                       static_cast<float>(spawnZ) };
     while (checkCollision(spawnPos))
         spawnPos.y += 0.1f;
     
-    // Set up the camera (player). camera.position represents the player's feet.
+    // Set up the camera (player); camera.position represents the player's feet.
     Camera camera;
     camera.position = spawnPos;
     camera.yaw   = -3.14f / 2;  // Facing -Z.
@@ -350,7 +389,7 @@ int main(int argc, char* argv[]) {
         int playerChunkZ = static_cast<int>(floor(camera.position.z / chunkSize));
         for (int cx = playerChunkX - renderDistance; cx <= playerChunkX + renderDistance; cx++) {
             for (int cz = playerChunkZ - renderDistance; cz <= playerChunkZ + renderDistance; cz++) {
-                std::pair<int, int> key = {cx, cz};
+                std::pair<int,int> key = {cx, cz};
                 if (chunks.find(key) == chunks.end()) {
                     Chunk chunk = generateChunk(cx, cz);
                     chunks.insert({key, chunk});
@@ -359,7 +398,7 @@ int main(int argc, char* argv[]) {
         }
         
         // --- Rendering ---
-        glClearColor(0.53f, 0.81f, 0.92f, 1.0f); // Sky-blue background.
+        glClearColor(0.53f, 0.81f, 0.92f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glUseProgram(shaderProgram);
         glActiveTexture(GL_TEXTURE0);
@@ -368,7 +407,7 @@ int main(int argc, char* argv[]) {
         glUniform1i(texUniformLoc, 0);
         
         Vec3 eyePosition = camera.position;
-        eyePosition.y += 1.6f; // Eye level offset.
+        eyePosition.y += 1.6f;  // Eye level offset.
         Vec3 viewDirection = { cos(camera.yaw) * cos(camera.pitch),
                                sin(camera.pitch),
                                sin(camera.yaw) * cos(camera.pitch) };
@@ -382,7 +421,8 @@ int main(int argc, char* argv[]) {
         for (const auto &pair : chunks) {
             int cx = pair.first.first;
             int cz = pair.first.second;
-            if (abs(cx - playerChunkX) > renderDistance || abs(cz - playerChunkZ) > renderDistance)
+            if (abs(cx - playerChunkX) > renderDistance ||
+                abs(cz - playerChunkZ) > renderDistance)
                 continue;
             const Chunk &chunk = pair.second;
             Mat4 mvp = multiplyMatrix(pv, identityMatrix());
@@ -397,7 +437,7 @@ int main(int argc, char* argv[]) {
     }
     
     // --- Cleanup ---
-    // (For a full implementation, also delete each chunk's VAO/VBO.)
+    // (For a full implementation, you should also delete each chunk's VAO/VBO.)
     glDeleteProgram(shaderProgram);
     SDL_GL_DeleteContext(glContext);
     SDL_DestroyWindow(window);

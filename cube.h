@@ -3,13 +3,14 @@
 
 #include <vector>
 
-// Block types used for terrain.
+// Block types used for terrain and extra features.
 enum BlockType {
     BLOCK_GRASS,
     BLOCK_DIRT,
     BLOCK_STONE,
     BLOCK_SAND,
-    BLOCK_TREE_LOG
+    BLOCK_TREE_LOG,
+    BLOCK_LEAVES
 };
 
 // Adds a cube at position (x,y,z) with textures chosen based on the block type.

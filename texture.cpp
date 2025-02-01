@@ -4,7 +4,7 @@
 #include <iostream>
 
 GLuint loadTexture(const char* filename) {
-    // Flip the image vertically.
+    // Flip the image vertically so that (0,0) is at the bottom left.
     stbi_set_flip_vertically_on_load(true);
     
     int width, height, channels;
@@ -34,7 +34,7 @@ GLuint loadTexture(const char* filename) {
     // Ensure proper alignment.
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     
-    // Use clamp to edge to prevent bleeding.
+    // Use clamp-to-edge to prevent texture bleeding.
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);	
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     
