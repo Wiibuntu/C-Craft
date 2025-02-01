@@ -221,20 +221,27 @@ int main(int argc, char* argv[]) {
     }
     
     // --- Determine a safe spawn position ---
-    // For example, use (0,0) in world coordinates.
+    // For example, choose world coordinates (0,0).
     int spawnX = 0;
     int spawnZ = 0;
     int terrainHeight = getTerrainHeightAt(spawnX, spawnZ);
-    // Place player's feet 1 unit above the terrain.
-    Vec3 spawnPos = { static_cast<float>(spawnX), static_cast<float>(terrainHeight + 1), static_cast<float>(spawnZ) };
+
+    // Instead of placing the player's feet at terrainHeight + 1, add a larger offset.
+    // This makes the player spawn above the terrain so they can fall onto it.
+    float spawnHeightOffset = 3.0f;  // Adjust this value if needed.
+    Vec3 spawnPos = { static_cast<float>(spawnX),
+                  static_cast<float>(terrainHeight) + spawnHeightOffset,
+                  static_cast<float>(spawnZ) };
+
+    // Ensure the spawn position is free from collision (nudge upward if necessary).
     while (checkCollision(spawnPos))
-        spawnPos.y += 0.1f;
-    
-    // Set up the camera (player). Note: camera.position is the player's feet.
-    Camera camera;
-    camera.position = spawnPos;
-    camera.yaw   = -3.14f / 2;  // Facing -Z
-    camera.pitch = 0.0f;
+    spawnPos.y += 0.1f;
+
+// Set up the camera (player). Note: camera.position represents the player's feet.
+Camera camera;
+camera.position = spawnPos;
+camera.yaw   = -3.14f / 2;  // Facing -Z.
+camera.pitch = 0.0f;
     
     float verticalVelocity = 0.0f;
     const float gravity = -9.81f;
