@@ -3,14 +3,17 @@
 
 #include <vector>
 
-// Enum for block types.
+// Block types used for terrain.
 enum BlockType {
     BLOCK_GRASS,
     BLOCK_DIRT,
-    BLOCK_STONE
+    BLOCK_STONE,
+    BLOCK_SAND,
+    BLOCK_TREE_LOG
 };
 
-// addCube now takes a block type parameter.
+// Adds a cube at position (x,y,z) with textures chosen based on the block type.
+// Each vertex is defined with 3 position floats and 2 UV floats.
 void addCube(std::vector<float>& vertices, float x, float y, float z, BlockType blockType);
 
 #endif // CUBE_H
