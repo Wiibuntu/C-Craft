@@ -30,6 +30,10 @@ const int renderDistance = 5; // In chunks
 const float playerWidth  = 0.6f;
 const float playerHeight = 1.8f;
 
+// Forward declaration so that getTerrainHeightAt can be used in functions that come before its definition.
+int getTerrainHeightAt(int x, int z);
+
+
 // --- Biome Definitions ---
 enum Biome { BIOME_PLAINS, BIOME_DESERT, BIOME_EXTREME_HILLS, BIOME_FOREST };
 
@@ -295,17 +299,35 @@ int main(int argc, char* argv[]) {
     }
     
     // --- Determine a Safe Spawn Position ---
-    // For example, choose world coordinates (0,0).
-    int spawnX = 0, spawnZ = 0;
+// For example, choose world coordinates (0,0) for the spawn X/Z.
+int spawnX = 0;
+int spawnZ = 0;
+
+// Ensure that the spawn chunk is generated first.
+int spawnChunkX = spawnX / chunkSize;
+int spawnChunkZ = spawnZ / chunkSize;
+std::pair<int,int> spawnChunkKey = {spawnChunkX, spawnChunkZ};
+if (chunks.find(spawnChunkKey) == chunks.end()) {
+    Chunk spawnChunk = generateChunk(spawnChunkX, spawnChunkZ);
+    chunks.insert({spawnChunkKey, spawnChunk});
+}
+
+    // Get the terrain height at the spawn coordinates.
     int terrainHeight = getTerrainHeightAt(spawnX, spawnZ);
-    float spawnHeightOffset = 3.0f;  // Spawn a few units above the terrain.
+
+    // Start with a spawn height that is several units above the terrain.
+    float spawnHeightOffset = 3.0f;  // This makes the player fall onto the world.
     Vec3 spawnPos = { static_cast<float>(spawnX),
-                      static_cast<float>(terrainHeight) + spawnHeightOffset,
-                      static_cast<float>(spawnZ) };
-    while (checkCollision(spawnPos))
-        spawnPos.y += 0.1f;
-    
-    // Set up the camera (player); camera.position represents the player's feet.
+                  static_cast<float>(terrainHeight) + spawnHeightOffset,
+                  static_cast<float>(spawnZ) };
+
+    // Raise the spawn position until there is no collision.
+    while (checkCollision(spawnPos)) {
+    spawnPos.y += 0.2f;  // Increase by 0.2 units each time.
+}
+
+    // Now, initialize the camera (player) with this safe spawn position.
+    // Note: camera.position represents the player's feet.
     Camera camera;
     camera.position = spawnPos;
     camera.yaw   = -3.14f / 2;  // Facing -Z.
