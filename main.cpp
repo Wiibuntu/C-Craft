@@ -12,7 +12,7 @@
 const int SCREEN_WIDTH = 800;
 const int SCREEN_HEIGHT = 600;
 
-// Updated vertex shader: now passes texture coordinates to the fragment shader.
+// Updated vertex shader: passes texture coordinates to the fragment shader.
 const char* vertexShaderSource = R"(
 #version 330 core
 layout(location = 0) in vec3 aPos;
@@ -84,6 +84,11 @@ int main(int argc, char* argv[]) {
         return -1;
     }
     
+    // Enable vsync to help with stable timing
+    if (SDL_GL_SetSwapInterval(1) < 0) {
+        std::cerr << "Warning: Unable to set VSync! SDL Error: " << SDL_GetError() << std::endl;
+    }
+    
     glEnable(GL_DEPTH_TEST);
 
     // Build and compile shader program
@@ -99,10 +104,11 @@ int main(int argc, char* argv[]) {
         return -1;
     }
     
-    // Generate world geometry: create a larger flat terrain.
-    // We'll create a 64 x 64 grid of cubes.
+    // Generate world geometry: create a flat terrain.
+    // For debugging, we're using a 32x32 grid of cubes.
+    // Once stable, you can change this value to 64 for a larger world.
     std::vector<float> worldVertices;
-    int worldSize = 64;
+    int worldSize = 32; // Change to 64 after verifying stability.
     for (int x = -worldSize/2; x < worldSize/2; ++x) {
         for (int z = -worldSize/2; z < worldSize/2; ++z) {
             // Each cube is 1 unit high; place them at y = 0.
@@ -110,7 +116,7 @@ int main(int argc, char* argv[]) {
         }
     }
     
-    // Create VAO and VBO
+    // Create VAO and VBO for the world geometry
     GLuint VAO, VBO;
     glGenVertexArrays(1, &VAO);
     glGenBuffers(1, &VBO);
@@ -121,7 +127,7 @@ int main(int argc, char* argv[]) {
     glBufferData(GL_ARRAY_BUFFER, worldVertices.size() * sizeof(float),
                  worldVertices.data(), GL_STATIC_DRAW);
     
-    // Each vertex now has 5 floats (3 for position, 2 for texture coordinates)
+    // Each vertex has 5 floats: 3 for position, 2 for texture coordinates.
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
@@ -131,7 +137,7 @@ int main(int argc, char* argv[]) {
 
     // Set up the camera (player)
     Camera camera;
-    // Start the player slightly above ground (e.g. eye height ~1.8 units)
+    // Start the player slightly above ground (eye height ~1.8 units)
     camera.position = {0.0f, 1.8f, 20.0f};
     camera.yaw = -3.14f/2;  // Facing toward -Z
     camera.pitch = 0.0f;
@@ -149,11 +155,13 @@ int main(int argc, char* argv[]) {
     SDL_Event event;
     Uint32 lastTime = SDL_GetTicks();
 
+    // Main loop
     while (running) {
         Uint32 currentTime = SDL_GetTicks();
         float deltaTime = (currentTime - lastTime) / 1000.0f;
         lastTime = currentTime;
         
+        // Process events
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_QUIT)
                 running = false;
@@ -166,7 +174,7 @@ int main(int argc, char* argv[]) {
                 if (camera.pitch < -1.57f)
                     camera.pitch = -1.57f;
             }
-            // Jump on spacebar if on the ground
+            // Jump when spacebar is pressed if on the ground
             if (event.type == SDL_KEYDOWN) {
                 if (event.key.keysym.sym == SDLK_SPACE) {
                     if (camera.position.y <= groundHeight + 0.01f) {
@@ -179,7 +187,7 @@ int main(int argc, char* argv[]) {
         // Use keyboard for horizontal (player) movement.
         const Uint8* keystate = SDL_GetKeyboardState(nullptr);
         float speed = 10.0f * deltaTime;
-        // For player movement, ignore pitch: only use yaw.
+        // For player movement, ignore pitch and only use yaw.
         Vec3 moveForward = { cos(camera.yaw), 0, sin(camera.yaw) };
         moveForward = normalize(moveForward);
         Vec3 moveRight = normalize(cross(moveForward, {0,1,0}));
@@ -210,7 +218,7 @@ int main(int argc, char* argv[]) {
         // Activate texture unit 0 and bind our texture.
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, textureID);
-        // Set the sampler uniform so the shader knows to use texture unit 0.
+        // Tell the shader to use texture unit 0.
         GLint texUniformLoc = glGetUniformLocation(shaderProgram, "ourTexture");
         glUniform1i(texUniformLoc, 0);
         
@@ -218,8 +226,10 @@ int main(int argc, char* argv[]) {
         Mat4 projection = perspectiveMatrix(45.0f * 3.1415926f/180.0f,
                                             static_cast<float>(SCREEN_WIDTH)/SCREEN_HEIGHT,
                                             0.1f, 100.0f);
-        // For view direction, include pitch.
-        Vec3 viewDirection = { cos(camera.yaw)*cos(camera.pitch), sin(camera.pitch), sin(camera.yaw)*cos(camera.pitch) };
+        // Compute view direction including pitch.
+        Vec3 viewDirection = { cos(camera.yaw)*cos(camera.pitch),
+                               sin(camera.pitch),
+                               sin(camera.yaw)*cos(camera.pitch) };
         Vec3 cameraTarget = add(camera.position, viewDirection);
         Mat4 view = lookAtMatrix(camera.position, cameraTarget, {0,1,0});
         Mat4 model = identityMatrix();

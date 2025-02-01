@@ -4,8 +4,10 @@
 #include <iostream>
 
 GLuint loadTexture(const char* filename) {
+    // Flip the image vertically during load so that (0,0) is at the bottom left.
+    stbi_set_flip_vertically_on_load(true);
+
     int width, height, channels;
-    // stb_image loads images with (0,0) at the top-left by default.
     unsigned char* image = stbi_load(filename, &width, &height, &channels, 0);
     if (!image) {
         std::cerr << "Failed to load texture: " << filename << std::endl;
