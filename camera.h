@@ -3,11 +3,11 @@
 
 #include "math.h"
 
-// Simple camera structure with position, yaw, and pitch.
+// A simple camera (player) structure with position, yaw, and pitch.
 struct Camera {
     Vec3 position;
-    float yaw;   // Rotation around Y-axis (in radians)
-    float pitch; // Rotation around X-axis (in radians)
+    float yaw;   // rotation around Y-axis (in radians)
+    float pitch; // rotation around X-axis (in radians)
 };
 
 #endif // CAMERA_H

@@ -1,11 +1,11 @@
-# Makefile for the Voxel Engine
+# Makefile for the textured voxel engine
 
 CXX      = g++
 CXXFLAGS = -std=c++11 -Wall -I.
 LDFLAGS  = -lSDL2 -lGLEW -lGL
 
 # List all source files
-SRCS = main.cpp math.cpp shader.cpp cube.cpp
+SRCS = main.cpp math.cpp shader.cpp cube.cpp texture.cpp
 OBJS = $(SRCS:.cpp=.o)
 
 TARGET = voxel_engine
