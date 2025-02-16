@@ -1,8 +1,19 @@
 #include "noise.h"
 #include <cmath>
+#include <cstdlib>  // for srand, rand, etc.
 
-// Classic permutation array.
-static int permutation[256] = {
+// ---------------------------------------------------------------------------
+// By default, we had a static permutation array for Perlin. We'll now
+// allow re-seeding it using setNoiseSeed(seed). If the user never calls
+// setNoiseSeed, we fall back to the original pre-defined permutation.
+//
+// If you want to always randomize at startup (instead of a fixed default),
+// call setNoiseSeed(...) with your random seed once at initialization.
+//
+// ---------------------------------------------------------------------------
+
+// Original classic permutation array from the reference Perlin code.
+static int permutationDefault[256] = {
     151,160,137,91,90,15,131,13,201,95,96,53,194,233,7,225,
     140,36,103,30,69,142,8,99,37,240,21,10,23,190,6,148,
     247,120,234,75,0,26,197,62,94,252,219,203,117,35,11,32,
@@ -21,19 +32,65 @@ static int permutation[256] = {
     222,114,67,29,24,72,243,141,128,195,78,66,215,61,156,180
 };
 
+// This array will be our actual working copy of 256 random values. 
+static int permutation[256];
+
+// Extended array for indexing: p[i] = permutation[i mod 256].
 static int p[512];
 static bool initialized = false;
 
-static void initPermutation() {
+// Forward declaration for the internal method that re-initializes p[].
+static void initPermutationArray();
+
+// This function re-initializes p[] with the current content of the
+// 256-element permutation[] array.
+static void initPermutationArray()
+{
+    for (int i = 0; i < 256; i++) {
+        p[i] = permutation[i];
+        p[256 + i] = permutation[i];
+    }
+    initialized = true;
+}
+
+// setNoiseSeed: randomizes the 256-element permutation[] array using a
+// given seed, then re-initializes p[] from it.
+void setNoiseSeed(unsigned int seed)
+{
+    // Initialize the pseudo-random generator
+    std::srand(seed);
+
+    // Fill permutation[] with the default ordering 0..255
+    for (int i = 0; i < 256; i++) {
+        permutation[i] = i;
+    }
+    // Fisher-Yates shuffle
+    for (int i = 255; i > 0; i--) {
+        int swapIndex = std::rand() % (i + 1);
+        // swap
+        int tmp = permutation[i];
+        permutation[i] = permutation[swapIndex];
+        permutation[swapIndex] = tmp;
+    }
+
+    // Re-init p[] with the newly shuffled permutation
+    initPermutationArray();
+}
+
+// If the user never calls setNoiseSeed, we use the original classic array.
+static void useDefaultPermutationIfNecessary()
+{
     if (!initialized) {
+        // Copy the default array into permutation
         for (int i = 0; i < 256; i++) {
-            p[i] = permutation[i];
-            p[256 + i] = permutation[i];
+            permutation[i] = permutationDefault[i];
         }
-        initialized = true;
+        // Then fill p[] from it
+        initPermutationArray();
     }
 }
 
+// Fade, Lerp, Grad (as per standard Perlin).
 static float fade(float t) {
     return t * t * t * (t * (t * 6 - 15) + 10);
 }
@@ -49,40 +106,50 @@ static float grad(int hash, float x, float y, float z) {
     return ((h & 1) ? -u : u) + ((h & 2) ? -v : v);
 }
 
-float perlinNoise(float x, float y) {
-    initPermutation();
-    float z = 0.0f; // 2D noise with z fixed
-    int X = static_cast<int>(floor(x)) & 255;
-    int Y = static_cast<int>(floor(y)) & 255;
-    int Z = static_cast<int>(floor(z)) & 255;
+// 2D Perlin noise
+float perlinNoise(float x, float y)
+{
+    // Ensure we have an initialized p[] array
+    useDefaultPermutationIfNecessary();
+
+    float z = 0.0f; // we treat 2D as z=0
+    int X = static_cast<int>(std::floor(x)) & 255;
+    int Y = static_cast<int>(std::floor(y)) & 255;
+    int Z = static_cast<int>(std::floor(z)) & 255;
     
-    x -= floor(x);
-    y -= floor(y);
-    z -= floor(z);
+    x -= std::floor(x);
+    y -= std::floor(y);
+    z -= std::floor(z);
     
     float u = fade(x);
     float v = fade(y);
     float w = fade(z);
     
-    int A = p[X] + Y;
+    int A  = p[X] + Y;
     int AA = p[A] + Z;
     int AB = p[A + 1] + Z;
-    int B = p[X + 1] + Y;
+    int B  = p[X + 1] + Y;
     int BA = p[B] + Z;
     int BB = p[B + 1] + Z;
     
-    return lerp(w, 
-                lerp(v, lerp(u, grad(p[AA], x, y, z),
-                               grad(p[BA], x - 1, y, z)),
-                        lerp(u, grad(p[AB], x, y - 1, z),
-                               grad(p[BB], x - 1, y - 1, z))),
-                lerp(v, lerp(u, grad(p[AA + 1], x, y, z - 1),
-                               grad(p[BA + 1], x - 1, y, z - 1)),
-                        lerp(u, grad(p[AB + 1], x, y - 1, z - 1),
-                               grad(p[BB + 1], x - 1, y - 1, z - 1))));
+    float res = lerp(w, 
+        lerp(v, 
+            lerp(u, grad(p[AA], x, y, z),
+                     grad(p[BA], x - 1, y, z)),
+            lerp(u, grad(p[AB], x, y - 1, z),
+                     grad(p[BB], x - 1, y - 1, z))),
+        lerp(v,
+            lerp(u, grad(p[AA + 1], x, y, z - 1),
+                     grad(p[BA + 1], x - 1, y, z - 1)),
+            lerp(u, grad(p[AB + 1], x, y - 1, z - 1),
+                     grad(p[BB + 1], x - 1, y - 1, z - 1))));
+    
+    return res;
 }
 
-float fbmNoise(float x, float y, int octaves, float lacunarity, float gain) {
+// fractal Brownian motion
+float fbmNoise(float x, float y, int octaves, float lacunarity, float gain)
+{
     float amplitude = 1.0f;
     float frequency = 1.0f;
     float sum = 0.0f;

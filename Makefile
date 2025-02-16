@@ -1,24 +1,36 @@
-# Makefile for the textured voxel engine
+SHELL := /bin/bash
+CXX := g++
+CXXFLAGS := -std=c++11 -O2 -Wall
+LIBS := -lSDL2 -lGLEW -lGL
 
-CXX      = g++
-CXXFLAGS = -std=c++11 -Wall -I.
-LDFLAGS  = -lSDL2 -lGLEW -lGL
+OBJ := main.o shader.o texture.o math.o noise.o cube.o world.o
 
-# List all source files
-SRCS = main.cpp math.cpp shader.cpp cube.cpp texture.cpp noise.cpp
-OBJS = $(SRCS:.cpp=.o)
+all: voxel
 
-TARGET = voxel_engine
+voxel: $(OBJ)
+	$(CXX) $(CXXFLAGS) -o voxel $(OBJ) $(LIBS)
 
-all: $(TARGET)
+main.o: main.cpp shader.h texture.h math.h noise.h cube.h camera.h world.h
+	$(CXX) $(CXXFLAGS) -c main.cpp
 
-$(TARGET): $(OBJS)
-	$(CXX) $(CXXFLAGS) -o $(TARGET) $(OBJS) $(LDFLAGS)
+shader.o: shader.cpp shader.h
+	$(CXX) $(CXXFLAGS) -c shader.cpp
 
-%.o: %.cpp
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+texture.o: texture.cpp texture.h
+	$(CXX) $(CXXFLAGS) -c texture.cpp
+
+math.o: math.cpp math.h
+	$(CXX) $(CXXFLAGS) -c math.cpp
+
+noise.o: noise.cpp noise.h
+	$(CXX) $(CXXFLAGS) -c noise.cpp
+
+cube.o: cube.cpp cube.h
+	$(CXX) $(CXXFLAGS) -c cube.cpp
+
+world.o: world.cpp world.h noise.h cube.h
+	$(CXX) $(CXXFLAGS) -c world.cpp
 
 clean:
-	rm -f $(OBJS) $(TARGET)
+	rm -f *.o voxel
 
-.PHONY: all clean
