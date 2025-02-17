@@ -1,78 +1,123 @@
 #include "world.h"
-#include <fstream>
+#include "noise.h"    // for setNoiseSeed(...) if you use it
 #include <iostream>
-#include <sstream>
-#include <limits>
-#include <cstdlib>
+#include <fstream>
 
+// -----------------------------------------------------------------------------
+// The global map for additional / overridden blocks (trees, placed/destroyed).
+// This must be defined exactly once across your project.
+// -----------------------------------------------------------------------------
 std::map<std::tuple<int,int,int>, BlockType> extraBlocks;
 
-bool saveWorld(const std::string& filename, int seed,
-               float playerX, float playerY, float playerZ)
+// -----------------------------------------------------------------------------
+// loadWorld(...)
+// Reads a text file and populates:
+//   - outSeed, plus calls setNoiseSeed(...) to match your terrain generation
+//   - outPlayerX, outPlayerY, outPlayerZ
+//   - extraBlocks (including negative-sentinel entries for destroyed blocks)
+// -----------------------------------------------------------------------------
+bool loadWorld(const char* filename,
+               int &outSeed,
+               float &outPlayerX,
+               float &outPlayerY,
+               float &outPlayerZ)
 {
-    std::ofstream outFile(filename);
-    if (!outFile.is_open()) {
-        std::cerr << "Could not open file for saving world: " << filename << std::endl;
+    std::ifstream in(filename);
+    if(!in) {
+        std::cerr << "[loadWorld] Could not open file '" << filename << "'\n";
         return false;
     }
 
-    // Save the seed
-    outFile << "SEED " << seed << "\n";
+    // 1) Read the seed
+    in >> outSeed;
+    // 2) Read the player position
+    in >> outPlayerX >> outPlayerY >> outPlayerZ;
 
-    // Save the player’s location
-    outFile << "PLAYER " << playerX << " " << playerY << " " << playerZ << "\n";
+    // If you want your terrain to match that seed, do this:
+    setNoiseSeed(outSeed);
 
-    // Then each extra block: x y z blockType
-    for (auto & kv : extraBlocks) {
-        auto coord = kv.first;
-        BlockType type = kv.second;
-        int x = std::get<0>(coord);
-        int y = std::get<1>(coord);
-        int z = std::get<2>(coord);
-        outFile << x << " " << y << " " << z << " " << type << "\n";
-    }
+    // 3) Read how many entries we stored in extraBlocks
+    int count;
+    in >> count;
 
-    outFile.close();
-    std::cout << "World saved to " << filename << std::endl;
-    return true;
-}
-
-bool loadWorld(const std::string& filename, int & outSeed,
-               float & outPlayerX, float & outPlayerY, float & outPlayerZ)
-{
-    std::ifstream inFile(filename);
-    if (!inFile.is_open()) {
-        std::cerr << "Could not open file for loading world: " << filename << std::endl;
-        return false;
-    }
-
+    // Clear any existing entries, then read them from file
     extraBlocks.clear();
+    for(int i=0; i<count; i++)
+    {
+        int bx, by, bz;
+        int typeInt;   // we store block types as an int
+        in >> bx >> by >> bz >> typeInt;
 
-    // We set default in case file has no PLAYER line
-    outPlayerX = 0.0f;
-    outPlayerY = 10.0f;
-    outPlayerZ = 0.0f;
-
-    std::string token;
-    while (true) {
-        if (!(inFile >> token)) {
-            break; // no more data
-        }
-        if (token == "SEED") {
-            inFile >> outSeed;
-        } else if (token == "PLAYER") {
-            inFile >> outPlayerX >> outPlayerY >> outPlayerZ;
-        } else {
-            // We assume this is an integer for x
-            int x = std::stoi(token);
-            int y, z, typeInt;
-            inFile >> y >> z >> typeInt;
-            BlockType btype = static_cast<BlockType>(typeInt);
-            extraBlocks[std::make_tuple(x, y, z)] = btype;
-        }
+        // For normal blocks (>=0) or negative sentinel (<0), record them
+        extraBlocks[{bx, by, bz}] = (BlockType)typeInt;
     }
 
-    inFile.close();
-    std::cout << "World loaded from " << filename << std::endl;
+    in.close();
+
+    std::cout << "[loadWorld] Loaded seed=" << outSeed 
+              << " player(" << outPlayerX << ","
+              << outPlayerY << ","
+              << outPlayerZ << "), "
+              << "extraBlocks=" << count << "\n";
     return true;
 }
+
+// -----------------------------------------------------------------------------
+// saveWorld(...)
+// Writes out:
+//   - seed
+//   - player position
+//   - all entries in extraBlocks, including negative-sentinel ones
+// so that destroyed blocks remain destroyed after reloading.
+// -----------------------------------------------------------------------------
+bool saveWorld(const char* filename,
+               int seed,
+               float playerX,
+               float playerY,
+               float playerZ)
+{
+    std::ofstream out(filename);
+    if(!out) {
+        std::cerr << "[saveWorld] Could not open file '" << filename << "'\n";
+        return false;
+    }
+
+    // 1) Write the seed
+    out << seed << "\n";
+    // 2) Write the player position
+    out << playerX << " " << playerY << " " << playerZ << "\n";
+
+    // 3) Count how many blocks we have in extraBlocks. 
+    //    IMPORTANT: we do NOT skip negative sentinel now. 
+    //    That way, destroyed blocks remain recorded.
+    int count = (int)extraBlocks.size();
+    out << count << "\n";
+
+    // 4) Write each coordinate + type
+    for(const auto &kv : extraBlocks)
+    {
+        const auto &pos = kv.first;
+        BlockType bType = kv.second;
+
+        int bx = std::get<0>(pos);
+        int by = std::get<1>(pos);
+        int bz = std::get<2>(pos);
+
+        // bType might be >= 0 (normal blocks) or <0 (destroyed sentinel).
+        // We save everything so we can restore it exactly.
+        out << bx << " " 
+            << by << " " 
+            << bz << " " 
+            << (int)bType << "\n";
+    }
+
+    out.close();
+
+    std::cout << "[saveWorld] Saved seed=" << seed
+              << " player(" << playerX << ","
+              << playerY << ","
+              << playerZ << ") with " 
+              << count << " block overrides.\n";
+    return true;
+}
+
