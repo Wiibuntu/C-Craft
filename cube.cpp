@@ -14,11 +14,11 @@ const float grassSideTileX   = 1.0f, grassSideTileY   = 15.0f;
 const float grassBottomTileX = 2.0f, grassBottomTileY = 15.0f;
 
 // Dirt block (two variants):
-const float dirtTile1X = 0.0f, dirtTile1Y = 14.0f;
-const float dirtTile2X = 1.0f, dirtTile2Y = 14.0f;
+const float dirtTile1X = 2.0f, dirtTile1Y = 15.0f;
+const float dirtTile2X = 2.0f, dirtTile2Y = 15.0f;
 
 // Stone block:
-const float stoneTileX = 2.0f, stoneTileY = 14.0f;
+const float stoneTileX = 3.0f, stoneTileY = 15.0f;
 
 // Sand block:
 const float sandTileX = 3.0f, sandTileY = 14.0f;
