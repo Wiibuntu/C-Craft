@@ -119,7 +119,7 @@ static void drawBlockPreview(int blockID, float x, float y, float size)
     // Build a small perspective camera
     Mat4 proj= perspectiveMatrix(45.0f*(3.14159f/180.0f),
                                  1.0f, 0.1f, 100.0f);
-    Vec3 eye= {0.0f, 0.0f, 2.0f};  // Closer to the block, so it appears bigger
+    Vec3 eye= {0.0f, 0.0f, 2.0f};  // Closer so the block appears bigger
     Vec3 ctr= {0.0f, 0.0f, 0.0f};
     Vec3 up = {0.0f, 1.0f, 0.0f};
     Mat4 view= lookAtMatrix(eye, ctr, up);
@@ -178,6 +178,7 @@ Inventory::Inventory()
     m_items.push_back(BLOCK_SAND);
     m_items.push_back(BLOCK_TREE_LOG);
     m_items.push_back(BLOCK_LEAVES);
+    m_items.push_back(BLOCK_WATER); // Optionally add water block to inventory
 }
 
 // -----------------------------------------------------------------------------------

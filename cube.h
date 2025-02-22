@@ -10,7 +10,8 @@ enum BlockType {
     BLOCK_STONE,
     BLOCK_SAND,
     BLOCK_TREE_LOG,
-    BLOCK_LEAVES
+    BLOCK_LEAVES,
+    BLOCK_WATER  // <-- NEW block type for water
 };
 
 // Adds a cube at position (x,y,z) with textures chosen based on the block type.
@@ -18,3 +19,4 @@ enum BlockType {
 void addCube(std::vector<float>& vertices, float x, float y, float z, BlockType blockType);
 
 #endif // CUBE_H
+
