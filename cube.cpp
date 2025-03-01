@@ -23,6 +23,9 @@ const float stoneTileX = 1.0f, stoneTileY = 15.0f;
 // Sand block:
 const float sandTileX = 2.0f, sandTileY = 14.0f;
 
+// Bedrock block (new):
+const float bedrockTileX = 1.0f, bedrockTileY = 14.0f; // Adjust these coordinates as needed
+
 // Tree log block:
 const float treeLogTopTileX = 5.0f, treeLogTopTileY = 14.0f;
 const float treeLogSideTileX = 4.0f, treeLogSideTileY = 14.0f;
@@ -71,6 +74,11 @@ void addCube(std::vector<float>& vertices, float x, float y, float z, BlockType 
         getTileUV(sandTileX, sandTileY, uvTop);
         getTileUV(sandTileX, sandTileY, uvSide);
         getTileUV(sandTileX, sandTileY, uvBottom);
+    } else if (blockType == BLOCK_BEDROCK) {
+        // For bedrock, use a uniform texture.
+        getTileUV(bedrockTileX, bedrockTileY, uvTop);
+        getTileUV(bedrockTileX, bedrockTileY, uvSide);
+        getTileUV(bedrockTileX, bedrockTileY, uvBottom);
     } else if (blockType == BLOCK_TREE_LOG) {
         // Tree logs: top/bottom use one tile; sides use another.
         getTileUV(treeLogTopTileX, treeLogTopTileY, uvTop);
@@ -93,11 +101,7 @@ void addCube(std::vector<float>& vertices, float x, float y, float z, BlockType 
     float y0 = y,     y1 = y + 1;
     float z0 = z,     z1 = z + 1;
     
-    // For brevity, we add faces in this order:
-    // Front, Back, Left, Right, Top, Bottom.
-    // Each face is two triangles (6 vertices), 5 floats each (x,y,z, u,v).
-    
-    // Front face (z = z1) uses side texture.
+    // Front face (z = z1)
     {
         vertices.insert(vertices.end(), { x0, y0, z1, uvSide[0][0], uvSide[0][1] });
         vertices.insert(vertices.end(), { x1, y0, z1, uvSide[1][0], uvSide[1][1] });
@@ -107,7 +111,7 @@ void addCube(std::vector<float>& vertices, float x, float y, float z, BlockType 
         vertices.insert(vertices.end(), { x0, y1, z1, uvSide[3][0], uvSide[3][1] });
     }
     
-    // Back face (z = z0) uses side texture.
+    // Back face (z = z0)
     {
         vertices.insert(vertices.end(), { x1, y0, z0, uvSide[0][0], uvSide[0][1] });
         vertices.insert(vertices.end(), { x0, y0, z0, uvSide[1][0], uvSide[1][1] });
@@ -117,7 +121,7 @@ void addCube(std::vector<float>& vertices, float x, float y, float z, BlockType 
         vertices.insert(vertices.end(), { x1, y1, z0, uvSide[3][0], uvSide[3][1] });
     }
     
-    // Left face (x = x0) uses side texture.
+    // Left face (x = x0)
     {
         vertices.insert(vertices.end(), { x0, y0, z0, uvSide[0][0], uvSide[0][1] });
         vertices.insert(vertices.end(), { x0, y0, z1, uvSide[1][0], uvSide[1][1] });
@@ -127,7 +131,7 @@ void addCube(std::vector<float>& vertices, float x, float y, float z, BlockType 
         vertices.insert(vertices.end(), { x0, y1, z0, uvSide[3][0], uvSide[3][1] });
     }
     
-    // Right face (x = x1) uses side texture.
+    // Right face (x = x1)
     {
         vertices.insert(vertices.end(), { x1, y0, z1, uvSide[0][0], uvSide[0][1] });
         vertices.insert(vertices.end(), { x1, y0, z0, uvSide[1][0], uvSide[1][1] });

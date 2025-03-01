@@ -4,10 +4,10 @@
 #include <fstream>
 
 // Define extraBlocks (for terrain overrides)
-std::map<std::tuple<int,int,int>, BlockType> extraBlocks;
+std::unordered_map<std::tuple<int,int,int>, BlockType, TupleHash> extraBlocks;
 
 // Define waterLevels (maps (x,y,z) to water level 1–8)
-std::map<std::tuple<int,int,int>, int> waterLevels;
+std::unordered_map<std::tuple<int,int,int>, int, TupleHash> waterLevels;
 
 bool loadWorld(const char* filename,
                int &outSeed,

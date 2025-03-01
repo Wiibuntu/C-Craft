@@ -3,10 +3,10 @@
 #include <iostream>
 #include <vector>
 #include <cmath>
-#include <map>
+#include <unordered_map>
 #include <tuple>
-#include <cstdlib>   // for rand(), srand
-#include <ctime>     // for time(NULL)
+#include <cstdlib>
+#include <ctime>
 
 #include "math.h"
 #include "shader.h"
@@ -16,46 +16,62 @@
 #include "noise.h"
 #include "world.h"
 #include "inventory.h"
+#include "globals.h"  // For custom hash functors
 
 // -----------------------------------------------------------------------------
-// Window / screen
+// Window / screen settings
 // -----------------------------------------------------------------------------
 int SCREEN_WIDTH  = 1280;
 int SCREEN_HEIGHT = 720;
 
+// -----------------------------------------------------------------------------
 // Terrain parameters
+// -----------------------------------------------------------------------------
 static const int chunkSize      = 16;
 static const int renderDistance = 8;
 
+// -----------------------------------------------------------------------------
 // Player and world limits
+// -----------------------------------------------------------------------------
 static const float playerWidth  = 0.6f;
 static const float playerHeight = 1.8f;
 static const float WORLD_FLOOR_LIMIT = -10.0f;
 
+// -----------------------------------------------------------------------------
 // Gravity & jump speed
+// -----------------------------------------------------------------------------
 static const float GRAVITY    = -9.81f;
 static const float JUMP_SPEED =  5.0f;
 
-// 3D pipeline
+// -----------------------------------------------------------------------------
+// 3D pipeline globals
+// -----------------------------------------------------------------------------
 GLuint worldShader = 0;
 GLuint texID       = 0;
 
-// 2D UI pipeline
+// -----------------------------------------------------------------------------
+// 2D UI pipeline globals
+// -----------------------------------------------------------------------------
 GLuint uiShader    = 0;
 GLuint uiVAO       = 0;
 GLuint uiVBO       = 0;
 
+// -----------------------------------------------------------------------------
 // A chunk holds geometry for a 16x16 area.
+// -----------------------------------------------------------------------------
 struct Chunk {
     int chunkX, chunkZ;
     std::vector<float> vertices;
     GLuint VAO, VBO;
 };
 
-std::map<std::pair<int,int>, Chunk> chunks;  // chunk storage
+// -----------------------------------------------------------------------------
+// Use an unordered_map with custom hash for faster chunk lookups
+// -----------------------------------------------------------------------------
+std::unordered_map<std::pair<int,int>, Chunk, PairHash> chunks;
 
 // -----------------------------------------------------------------------------
-// Biome definitions (added BIOME_OCEAN)
+// Biome definitions (including BIOME_OCEAN)
 // -----------------------------------------------------------------------------
 enum Biome {
     BIOME_PLAINS,
@@ -67,7 +83,6 @@ enum Biome {
 
 static Biome getBiome(int x, int z)
 {
-    // Use very low-frequency noise to determine ocean biome.
     float oceanNoise = perlinNoise(x * 0.001f, z * 0.001f);
     if(oceanNoise < -0.8f)
         return BIOME_OCEAN;
@@ -89,7 +104,7 @@ int getTerrainHeightAt(int x, int z)
 {
     Biome b = getBiome(x, z);
     if(b == BIOME_OCEAN)
-        return 8; // flat ocean floor.
+        return 8; // For ocean, we define height 8 (6 water layers + 1 sand + 1 bedrock)
     if(b == BIOME_EXTREME_HILLS)
     {
         float freq = 0.0007f;
@@ -114,8 +129,6 @@ int getTerrainHeightAt(int x, int z)
 // -----------------------------------------------------------------------------
 static bool blockHasCollision(BlockType t)
 {
-    // Water is non-solid.
-    // Tree leaves are now considered “breakable” so we do not treat them as non-hittable.
     return (t != BLOCK_WATER);
 }
 
@@ -158,10 +171,105 @@ static bool checkCollision(const Vec3 &pos)
 }
 
 // -----------------------------------------------------------------------------
-// generateChunk: Generates terrain for a chunk.
-// This function carves out rivers (in non-desert/non-ocean biomes),
-// spawns oases (now 5× more frequent), and generates ocean columns.
-// Trees are generated only on normal terrain (not in lakes, rivers, or ocean).
+// Forward declaration for rebuildChunk so that updateWaterFlow can use it.
+// -----------------------------------------------------------------------------
+static void rebuildChunk(int cx, int cz);
+
+// -----------------------------------------------------------------------------
+// adjustPlayerSpawn: Moves the player upward until a non-colliding position above a solid block is found.
+// -----------------------------------------------------------------------------
+void adjustPlayerSpawn(Camera &camera)
+{
+    // Move upward until no collision is detected.
+    while(checkCollision(camera.position))
+    {
+        camera.position.y += 0.5f;
+        if(camera.position.y > 1000.0f) break;
+    }
+    // Ensure the player's feet are above a solid block.
+    int tx = (int)std::floor(camera.position.x);
+    int tz = (int)std::floor(camera.position.z);
+    int terrainHeight = getTerrainHeightAt(tx, tz);
+    if(camera.position.y <= terrainHeight)
+    {
+        camera.position.y = terrainHeight + 1.0f;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Basic Water Spreading Function
+//
+// Processes only water cells in chunks near the player (within NEAR_CHUNK_RADIUS).
+// Water spreads downward and horizontally (decreasing level by 1 per block, limited to 6 blocks from the source).
+// After every update, the chunk containing that cell is rebuilt immediately.
+// -----------------------------------------------------------------------------
+static const int NEAR_CHUNK_RADIUS = 2;
+
+static void updateWaterFlow(const Camera &camera, float /*dt*/)
+{
+    int playerChunkX = (int)std::floor(camera.position.x / (float)chunkSize);
+    int playerChunkZ = (int)std::floor(camera.position.z / (float)chunkSize);
+
+    std::vector<std::tuple<int,int,int>> waterKeys;
+    for(auto &entry : waterLevels)
+        waterKeys.push_back(entry.first);
+
+    for(auto key : waterKeys)
+    {
+        int x, y, z;
+        std::tie(x, y, z) = key;
+        int cellChunkX = x / 16; if(x < 0 && x % 16 != 0) cellChunkX--;
+        int cellChunkZ = z / 16; if(z < 0 && z % 16 != 0) cellChunkZ--;
+        if (std::abs(cellChunkX - playerChunkX) > NEAR_CHUNK_RADIUS ||
+            std::abs(cellChunkZ - playerChunkZ) > NEAR_CHUNK_RADIUS)
+            continue;
+
+        int level = waterLevels[key];
+
+        // Flow downward
+        if(y > 0 && !isSolidBlock(x, y - 1, z))
+        {
+            std::tuple<int,int,int> below = {x, y - 1, z};
+            int belowLevel = 0;
+            if(waterLevels.find(below) != waterLevels.end())
+                belowLevel = waterLevels[below];
+            if(8 > belowLevel)
+            {
+                waterLevels[below] = 8;
+                int cx = x / 16; if(x < 0 && x % 16 != 0) cx--;
+                int cz = z / 16; if(z < 0 && z % 16 != 0) cz--;
+                rebuildChunk(cx, cz);
+            }
+        }
+
+        // Horizontal spread: only if water level > 1
+        if(level > 1)
+        {
+            int offsets[4][3] = { {1,0,0}, {-1,0,0}, {0,0,1}, {0,0,-1} };
+            for(int i = 0; i < 4; i++)
+            {
+                int nx = x + offsets[i][0];
+                int ny = y;
+                int nz = z + offsets[i][2];
+                std::tuple<int,int,int> neighbor = {nx, ny, nz};
+                int neighborLevel = 0;
+                if(waterLevels.find(neighbor) != waterLevels.end())
+                    neighborLevel = waterLevels[neighbor];
+                int newLevel = level - 1;
+                if(newLevel > neighborLevel && newLevel > 1)
+                {
+                    waterLevels[neighbor] = newLevel;
+                    int cx = nx / 16; if(nx < 0 && nx % 16 != 0) cx--;
+                    int cz = nz / 16; if(nz < 0 && nz % 16 != 0) cz--;
+                    rebuildChunk(cx, cz);
+                }
+            }
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Chunk Generation and Rebuilding Functions
 // -----------------------------------------------------------------------------
 static Chunk generateChunk(int cx, int cz)
 {
@@ -171,119 +279,39 @@ static Chunk generateChunk(int cx, int cz)
     std::vector<float> verts;
     verts.reserve(16 * 16 * 36 * 5);
 
-    // Use a per-chunk seed for independent outcomes.
     unsigned int chunkSeed = (unsigned int)(cx * 73856093u ^ cz * 19349663u);
     Biome chunkBiome = getBiome(cx * 16 + 8, cz * 16 + 8);
-    bool hasLake = false;
-    int lakeCenterX = 0, lakeCenterZ = 0, lakeRadius = 0, lakeWaterLevel = 0;
-    // Increase oasis chance 5× (now 1 in 40) for non-desert, non-ocean chunks.
-    if(chunkBiome != BIOME_DESERT && chunkBiome != BIOME_OCEAN && (chunkSeed % 40 == 0))
+
+    // Special handling for ocean biome: spawn 6 water layers, then a sand layer, then a bedrock layer.
+    if(chunkBiome == BIOME_OCEAN)
     {
-        hasLake = true;
-        lakeCenterX = cx * 16 + (rand() % 16);
-        lakeCenterZ = cz * 16 + (rand() % 16);
-        lakeRadius = 2 + (rand() % 7); // radius between 2 and 8
-        int terrainAtCenter = getTerrainHeightAt(lakeCenterX, lakeCenterZ);
-        lakeWaterLevel = terrainAtCenter - 2;
-        if(lakeWaterLevel < 0)
-            lakeWaterLevel = 0;
+        const int oceanWaterLayers = 6;
+        for(int y = 0; y < oceanWaterLayers; y++){
+            addCube(verts, (float)(cx*16 + 0), (float)y, (float)(cz*16 + 0), BLOCK_WATER); // dummy; we'll fill column by column below
+        }
+        // We generate per-column below in the loop.
     }
 
-    // Loop over every column in the chunk.
     for(int lx = 0; lx < 16; lx++){
         for(int lz = 0; lz < 16; lz++){
             int wx = cx * 16 + lx;
             int wz = cz * 16 + lz;
-            int height = getTerrainHeightAt(wx, wz);
             Biome b = getBiome(wx, wz);
-            bool inLake = false;
-            bool inRiver = false;
-            if(hasLake){
-                int dx = wx - lakeCenterX, dz = wz - lakeCenterZ;
-                if(dx*dx + dz*dz <= lakeRadius * lakeRadius)
-                    inLake = true;
-            }
-            if(b != BIOME_DESERT && b != BIOME_OCEAN){
-                float riverNoise = perlinNoise(wx * 0.1f, wz * 0.1f);
-                if(riverNoise < -0.85f)
-                    inRiver = true;
-            }
-
             if(b == BIOME_OCEAN)
             {
-                int newHeight = 7;
-                for(int y = 0; y <= newHeight; y++){
-                    addCube(verts, (float)wx, (float)y, (float)wz, BLOCK_SAND);
+                // For ocean: water layers for y = 0 .. 5, then sand at layer 6, bedrock at layer 7.
+                const int oceanWaterLayers = 6;
+                for(int y = 0; y < oceanWaterLayers; y++){
+                    addCube(verts, (float)wx, (float)y, (float)wz, BLOCK_WATER);
+                    waterLevels[{wx, y, wz}] = 8;
                 }
-                addCube(verts, (float)wx, 8.0f, (float)wz, BLOCK_WATER);
-                waterLevels[{wx, 8, wz}] = 8;
-            }
-            else if(inLake)
-            {
-                int newHeight = lakeWaterLevel - 1;
-                if(newHeight < 0) newHeight = 0;
-                for(int y = 0; y <= newHeight; y++){
-                    BlockType type;
-                    if(b == BIOME_DESERT){
-                        const int sandLayers = 2, dirtLayers = 3;
-                        if(y >= newHeight - sandLayers)
-                            type = BLOCK_SAND;
-                        else if(y >= newHeight - (sandLayers + dirtLayers))
-                            type = BLOCK_DIRT;
-                        else
-                            type = BLOCK_STONE;
-                    }
-                    else {
-                        if(y == newHeight)
-                            type = BLOCK_DIRT;
-                        else if((newHeight - y) <= 6)
-                            type = BLOCK_DIRT;
-                        else
-                            type = BLOCK_STONE;
-                    }
-                    addCube(verts, (float)wx, (float)y, (float)wz, type);
-                }
-                addCube(verts, (float)wx, (float)lakeWaterLevel, (float)wz, BLOCK_WATER);
-                waterLevels[{wx, lakeWaterLevel, wz}] = 8;
-                for(int y = lakeWaterLevel + 1; y <= height; y++){
-                    extraBlocks[{wx, y, wz}] = (BlockType)(-1);
-                }
-            }
-            else if(inRiver)
-            {
-                int riverWaterLevel = 7;
-                int newHeight = riverWaterLevel - 1;
-                if(newHeight < 0) newHeight = 0;
-                for(int y = 0; y <= newHeight; y++){
-                    BlockType type;
-                    if(b == BIOME_DESERT){
-                        const int sandLayers = 2, dirtLayers = 3;
-                        if(y >= newHeight - sandLayers)
-                            type = BLOCK_SAND;
-                        else if(y >= newHeight - (sandLayers + dirtLayers))
-                            type = BLOCK_DIRT;
-                        else
-                            type = BLOCK_STONE;
-                    }
-                    else {
-                        if(y == newHeight)
-                            type = BLOCK_DIRT;
-                        else if((newHeight - y) <= 6)
-                            type = BLOCK_DIRT;
-                        else
-                            type = BLOCK_STONE;
-                    }
-                    addCube(verts, (float)wx, (float)y, (float)wz, type);
-                }
-                addCube(verts, (float)wx, (float)riverWaterLevel, (float)wz, BLOCK_WATER);
-                waterLevels[{wx, riverWaterLevel, wz}] = 8;
-                for(int y = riverWaterLevel + 1; y <= height; y++){
-                    extraBlocks[{wx, y, wz}] = (BlockType)(-1);
-                }
+                addCube(verts, (float)wx, (float)oceanWaterLayers, (float)wz, BLOCK_SAND);
+                addCube(verts, (float)wx, (float)(oceanWaterLayers + 1), (float)wz, BLOCK_BEDROCK);
             }
             else
             {
-                // Normal terrain.
+                int height = getTerrainHeightAt(wx, wz);
+                // Normal terrain column generation
                 for(int y = 0; y <= height; y++){
                     BlockType type;
                     if(b == BIOME_DESERT){
@@ -305,7 +333,7 @@ static Chunk generateChunk(int cx, int cz)
                     }
                     addCube(verts, (float)wx, (float)y, (float)wz, type);
                 }
-                // Tree generation.
+                // Tree generation
                 int chance = 0;
                 if(b == BIOME_FOREST) chance = 5;
                 else if(b == BIOME_PLAINS) chance = 50;
@@ -348,87 +376,85 @@ static Chunk generateChunk(int cx, int cz)
     return chunk;
 }
 
-// -----------------------------------------------------------------------------
-// rebuildChunk: Ensures that water blocks in waterLevels are retained when
-// chunks are rebuilt, preventing them from being overwritten by terrain blocks.
-// -----------------------------------------------------------------------------
 static void rebuildChunk(int cx, int cz)
 {
     Chunk &chunk = chunks[{cx, cz}];
     std::vector<float> verts;
     verts.reserve(16 * 16 * 36 * 5);
     
-    for (int lx = 0; lx < 16; lx++) {
-        for (int lz = 0; lz < 16; lz++) {
+    for (int lx = 0; lx < 16; lx++){
+        for (int lz = 0; lz < 16; lz++){
             int wx = cx * 16 + lx;
             int wz = cz * 16 + lz;
-            int height = getTerrainHeightAt(wx, wz);
-
-            for (int y = 0; y <= height; y++) {
-                std::tuple<int, int, int> key = {wx, y, wz};
-
-                // **Check if this position contains water first**
-                if (waterLevels.find(key) != waterLevels.end()) {
+            Biome b = getBiome(wx, wz);
+            if(b == BIOME_OCEAN)
+            {
+                const int oceanWaterLayers = 6;
+                for (int y = 0; y < oceanWaterLayers; y++){
                     addCube(verts, (float)wx, (float)y, (float)wz, BLOCK_WATER);
-                    continue;  // Skip normal terrain generation
+                    waterLevels[{wx, y, wz}] = 8;
                 }
-
-                // **Check for extraBlocks (modifications, trees, etc.)**
-                auto it = extraBlocks.find(key);
-                if (it != extraBlocks.end()) {
-                    BlockType ov = it->second;
-                    if ((int)ov < 0) continue;  // Skip air/removed blocks
-                    addCube(verts, (float)wx, (float)y, (float)wz, ov);
-                }
-                else {
-                    // **Regular terrain generation (if no water or extra blocks exist)**
-                    Biome b = getBiome(wx, wz);
-                    BlockType terr;
-                    if (b == BIOME_DESERT) {
-                        const int sandLayers = 2, dirtLayers = 3;
-                        if (y >= height - sandLayers)
-                            terr = BLOCK_SAND;
-                        else if (y >= height - (sandLayers + dirtLayers))
-                            terr = BLOCK_DIRT;
-                        else
-                            terr = BLOCK_STONE;
+                addCube(verts, (float)wx, (float)oceanWaterLayers, (float)wz, BLOCK_SAND);
+                addCube(verts, (float)wx, (float)(oceanWaterLayers + 1), (float)wz, BLOCK_BEDROCK);
+            }
+            else {
+                int height = getTerrainHeightAt(wx, wz);
+                for (int y = 0; y <= height; y++){
+                    std::tuple<int,int,int> key = {wx, y, wz};
+                    if (waterLevels.find(key) != waterLevels.end()){
+                        addCube(verts, (float)wx, (float)y, (float)wz, BLOCK_WATER);
+                        continue;
+                    }
+                    auto it = extraBlocks.find(key);
+                    if (it != extraBlocks.end()){
+                        BlockType ov = it->second;
+                        if ((int)ov < 0) continue;
+                        addCube(verts, (float)wx, (float)y, (float)wz, ov);
                     }
                     else {
-                        if (y == height)
-                            terr = BLOCK_GRASS;
-                        else if ((height - y) <= 6)
-                            terr = BLOCK_DIRT;
-                        else
-                            terr = BLOCK_STONE;
+                        BlockType terr;
+                        if(b == BIOME_DESERT){
+                            const int sandLayers = 2, dirtLayers = 3;
+                            if (y >= height - sandLayers)
+                                terr = BLOCK_SAND;
+                            else if (y >= height - (sandLayers + dirtLayers))
+                                terr = BLOCK_DIRT;
+                            else
+                                terr = BLOCK_STONE;
+                        }
+                        else {
+                            if (y == height)
+                                terr = BLOCK_GRASS;
+                            else if ((height - y) <= 6)
+                                terr = BLOCK_DIRT;
+                            else
+                                terr = BLOCK_STONE;
+                        }
+                        addCube(verts, (float)wx, (float)y, (float)wz, terr);
                     }
-                    addCube(verts, (float)wx, (float)y, (float)wz, terr);
                 }
-            }
-
-            // **Ensure tree parts are placed above the terrain level**
-            for (int y = height + 1; y < height + 20; y++) {
-                std::tuple<int, int, int> key = {wx, y, wz};
-                if (extraBlocks.find(key) != extraBlocks.end()) {
-                    BlockType ov = extraBlocks[key];
-                    if ((int)ov < 0) continue;
-                    addCube(verts, (float)wx, (float)y, (float)wz, ov);
+                for (int y = height + 1; y < height + 20; y++){
+                    std::tuple<int,int,int> key = {wx, y, wz};
+                    if (extraBlocks.find(key) != extraBlocks.end()){
+                        BlockType ov = extraBlocks[key];
+                        if ((int)ov < 0) continue;
+                        addCube(verts, (float)wx, (float)y, (float)wz, ov);
+                    }
                 }
             }
         }
     }
-
-    // **Ensure water blocks are retained even if chunk updates**
-    for (auto &kv : waterLevels) {
+    
+    for (auto &kv : waterLevels){
         int bx = std::get<0>(kv.first);
         int by = std::get<1>(kv.first);
         int bz = std::get<2>(kv.first);
-        int ccx = bx / 16; if (bx < 0 && bx % 16 != 0) ccx--;
-        int ccz = bz / 16; if (bz < 0 && bz % 16 != 0) ccz--;
-        if (ccx == cx && ccz == cz)
+        int ccx = bx / 16; if(bx < 0 && bx % 16 != 0) ccx--;
+        int ccz = bz / 16; if(bz < 0 && bz % 16 != 0) ccz--;
+        if(ccx == cx && ccz == cz)
             addCube(verts, (float)bx, (float)by, (float)bz, BLOCK_WATER);
     }
-
-    // Upload new vertex data
+    
     chunk.vertices = verts;
     glBindVertexArray(chunk.VAO);
     glBindBuffer(GL_ARRAY_BUFFER, chunk.VBO);
@@ -436,57 +462,8 @@ static void rebuildChunk(int cx, int cz)
     glBindVertexArray(0);
 }
 
-
 // -----------------------------------------------------------------------------
-// updateWaterFlow: New water flow simulation.
-// For each water cell, if the cell below is empty, flow downward (becoming a source).
-// Otherwise, if water level > 1, flow horizontally by setting the neighbor's level
-// to current level minus one. This naturally limits horizontal spread to 6 blocks.
-// -----------------------------------------------------------------------------
-static void updateWaterFlow(float /*dt*/)
-{
-    std::map<std::tuple<int,int,int>, int> newWater = waterLevels;
-    bool updated = false;
-    for(auto &entry : waterLevels)
-    {
-        int x, y, z;
-        std::tie(x, y, z) = entry.first;
-        int level = entry.second;
-        // Flow downward.
-        if(y > 0 && !isSolidBlock(x, y-1, z)) {
-            std::tuple<int,int,int> below = {x, y-1, z};
-            int currentBelow = 0;
-            if(newWater.find(below) != newWater.end())
-                currentBelow = newWater[below];
-            if(8 > currentBelow) {
-                newWater[below] = 8;
-                updated = true;
-            }
-        }
-        // Flow horizontally.
-        if(level > 1) {
-            int offsets[4][3] = { {1,0,0}, {-1,0,0}, {0,0,1}, {0,0,-1} };
-            for(int i = 0; i < 4; i++){
-                int nx = x + offsets[i][0];
-                int ny = y;
-                int nz = z + offsets[i][2];
-                std::tuple<int,int,int> neighbor = {nx, ny, nz};
-                int neighborLevel = 0;
-                if(newWater.find(neighbor) != newWater.end())
-                    neighborLevel = newWater[neighbor];
-                int newLevel = level - 1;
-                if(newLevel > neighborLevel && newLevel > 1) {
-                    newWater[neighbor] = newLevel;
-                    updated = true;
-                }
-            }
-        }
-    }
-    waterLevels = newWater;
-}
-
-// -----------------------------------------------------------------------------
-// raycastBlock: Modified to return a hit for tree leaves so that they can be broken.
+// Raycast function (unchanged)
 // -----------------------------------------------------------------------------
 static bool raycastBlock(const Vec3 &start, const Vec3 &dir, float maxDist,
                          int &outX, int &outY, int &outZ)
@@ -634,6 +611,13 @@ static void getChunkCoords(int bx, int bz, int &cx, int &cz)
     cz = bz / 16; if(bz < 0 && bz % 16 != 0) cz--;
 }
 
+//
+// Basic Tick System:
+// A tick occurs every TICK_INTERVAL seconds.
+// Water spread is updated only on every 2nd tick.
+//
+static const float TICK_INTERVAL = 0.5f; // seconds per tick
+
 int main(int /*argc*/, char* /*argv*/[])
 {
     float loadedX = 0.0f, loadedY = 30.0f, loadedZ = 0.0f;
@@ -698,7 +682,7 @@ int main(int /*argc*/, char* /*argv*/[])
     Inventory inventory;
     int spawnChunkX = (int)std::floor(loadedX / (float)chunkSize);
     int spawnChunkZ = (int)std::floor(loadedZ / (float)chunkSize);
-    auto chunkKey = std::make_pair(spawnChunkX, spawnChunkZ);
+    std::pair<int,int> chunkKey = {spawnChunkX, spawnChunkZ};
     if(chunks.find(chunkKey) == chunks.end())
         chunks[chunkKey] = generateChunk(spawnChunkX, spawnChunkZ);
     Camera camera;
@@ -707,12 +691,17 @@ int main(int /*argc*/, char* /*argv*/[])
     camera.pitch = 0.0f;
     bool paused = false, isFlying = false;
     float verticalVelocity = 0.0f;
+
+    // Tick system variables
+    int tickCount = 0;
+    float tickAccumulator = 0.0f;
+
     if(loadedOk) {
         int pcx = (int)std::floor(camera.position.x / (float)chunkSize);
         int pcz = (int)std::floor(camera.position.z / (float)chunkSize);
         for(int cx = pcx - renderDistance; cx <= pcx + renderDistance; cx++){
             for(int cz = pcz - renderDistance; cz <= pcz + renderDistance; cz++){
-                auto cKey = std::make_pair(cx, cz);
+                std::pair<int,int> cKey = {cx, cz};
                 if(chunks.find(cKey) == chunks.end())
                     chunks[cKey] = generateChunk(cx, cz);
                 else
@@ -728,6 +717,18 @@ int main(int /*argc*/, char* /*argv*/[])
         Uint32 now = SDL_GetTicks();
         float dt = (now - lastTime) * 0.001f;
         lastTime = now;
+
+        // Tick system update
+        tickAccumulator += dt;
+        while(tickAccumulator >= TICK_INTERVAL) {
+            tickCount++;
+            tickAccumulator -= TICK_INTERVAL;
+            // Update water flow every 2 ticks in nearby chunks
+            if(tickCount % 2 == 0) {
+                updateWaterFlow(camera, TICK_INTERVAL);
+            }
+        }
+
         while(SDL_PollEvent(&ev)) {
             if(ev.type == SDL_QUIT) running = false;
             else if(ev.type == SDL_KEYDOWN) {
@@ -798,6 +799,8 @@ int main(int /*argc*/, char* /*argv*/[])
                                 if(!isSolidBlock(pbx, pby, pbz)) {
                                     int blockToPlace = inventory.getSelectedBlock();
                                     extraBlocks[{pbx, pby, pbz}] = (BlockType)blockToPlace;
+                                    if(blockToPlace == BLOCK_WATER)
+                                        waterLevels[{pbx, pby, pbz}] = 8;
                                     int cpx, cpz; getChunkCoords(pbx, pbz, cpx, cpz);
                                     rebuildChunk(cpx, cpz);
                                 }
@@ -908,12 +911,11 @@ int main(int /*argc*/, char* /*argv*/[])
         int pcz = (int)std::floor(camera.position.z/(float)chunkSize);
         for(int cx = pcx - renderDistance; cx <= pcx + renderDistance; cx++){
             for(int cz = pcz - renderDistance; cz <= pcz + renderDistance; cz++){
-                auto key = std::make_pair(cx, cz);
+                std::pair<int,int> key = {cx, cz};
                 if(chunks.find(key) == chunks.end())
                     chunks[key] = generateChunk(cx, cz);
             }
         }
-        updateWaterFlow(dt);
         glClearColor(0.53f, 0.81f, 0.92f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glUseProgram(worldShader);
