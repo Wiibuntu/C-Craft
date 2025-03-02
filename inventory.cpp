@@ -9,14 +9,12 @@
 #include "texture.h" // for texture functions
 #include "world.h"   // for BLOCK_GRASS, BLOCK_STONE, etc.
 
-// These symbols must be defined in exactly one .cpp (e.g., main.cpp) but declared extern in a shared header:
-extern GLuint worldShader;   // The 3D shader used by your main scene
-extern GLuint texID;         // The block texture
-extern int SCREEN_WIDTH;     // e.g., 1280
-extern int SCREEN_HEIGHT;    // e.g., 720
-
-// If you have a separate UI shader for 2D rectangles:
-extern GLuint uiShader;      // e.g., used for drawing pause menus, rectangles, etc.
+// External symbols defined elsewhere.
+extern GLuint worldShader;
+extern GLuint texID;
+extern int SCREEN_WIDTH;
+extern int SCREEN_HEIGHT;
+extern GLuint uiShader;
 
 //
 // Helper: Rotate matrix around Y-axis
@@ -26,7 +24,6 @@ static Mat4 rotateYMatrix(const Mat4 &m, float angle)
     Mat4 rot = identityMatrix();
     float c = cosf(angle);
     float s = sinf(angle);
-    // Only rotate around Y axis
     rot.m[0]  =  c;
     rot.m[2]  =  s;
     rot.m[8]  = -s;
@@ -50,8 +47,8 @@ static void drawRect2D(float x, float y, float w, float h,
         x,   y+h
     };
 
-    static GLuint s_vao=0, s_vbo=0;
-    static bool s_init=false;
+    static GLuint s_vao = 0, s_vbo = 0;
+    static bool s_init = false;
     if(!s_init){
         glGenVertexArrays(1, &s_vao);
         glGenBuffers(1, &s_vbo);
@@ -83,9 +80,8 @@ static void drawRect2D(float x, float y, float w, float h,
 }
 
 //
-// Helper to draw a block preview
+// Helper to draw a block preview.
 // If hovered, the block rotates; otherwise it remains static.
-// We use cached VAO/VBO for efficiency.
 //
 static void drawBlockPreview(int blockID, float x, float y, float size, bool hovered)
 {
@@ -100,7 +96,6 @@ static void drawBlockPreview(int blockID, float x, float y, float size, bool hov
     GLint uniTex = glGetUniformLocation(worldShader, "ourTexture");
     glUniform1i(uniTex, 0);
 
-    // Set up a small perspective camera with a 45-degree FOV
     Mat4 proj = perspectiveMatrix(45.0f*(3.14159f/180.0f), 1.0f, 0.1f, 100.0f);
     Vec3 eye = {0.0f, 0.0f, 2.0f};
     Vec3 ctr = {0.0f, 0.0f, 0.0f};
@@ -110,17 +105,13 @@ static void drawBlockPreview(int blockID, float x, float y, float size, bool hov
     Mat4 model = identityMatrix();
     if(hovered)
     {
-        // When hovered, rotate the block
         float angle = (float)SDL_GetTicks()*0.001f;
         model = rotateYMatrix(model, angle);
     }
-    // Else: leave the model matrix as identity (static)
-
     Mat4 mvp = multiplyMatrix(proj, multiplyMatrix(view, model));
     GLint mvpLoc = glGetUniformLocation(worldShader, "MVP");
     glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, mvp.m);
 
-    // Use cached VAO/VBO for the preview cube
     static GLuint previewVAO = 0, previewVBO = 0;
     static bool previewInitialized = false;
     if(!previewInitialized) {
@@ -145,12 +136,13 @@ static void drawBlockPreview(int blockID, float x, float y, float size, bool hov
 }
 
 //
-// Inventory constructor: now adds BLOCK_BEDROCK to the inventory.
+// Inventory constructor: now includes the new block types.
 //
 Inventory::Inventory()
     : m_isOpen(false)
     , m_selectedBlock(BLOCK_GRASS)
 {
+    // Original blocks
     m_items.push_back(BLOCK_GRASS);
     m_items.push_back(BLOCK_DIRT);
     m_items.push_back(BLOCK_STONE);
@@ -158,7 +150,29 @@ Inventory::Inventory()
     m_items.push_back(BLOCK_TREE_LOG);
     m_items.push_back(BLOCK_LEAVES);
     m_items.push_back(BLOCK_WATER);
-    m_items.push_back(BLOCK_BEDROCK); // Added bedrock to the inventory
+    m_items.push_back(BLOCK_BEDROCK);
+    // New blocks:
+    m_items.push_back(BLOCK_WOODEN_PLANKS);
+    m_items.push_back(BLOCK_COBBLESTONE);
+    m_items.push_back(BLOCK_GRAVEL);
+    m_items.push_back(BLOCK_BRICKS);
+    m_items.push_back(BLOCK_GLASS);
+    m_items.push_back(BLOCK_SPONGE);
+    m_items.push_back(BLOCK_WOOL_WHITE);
+    m_items.push_back(BLOCK_WOOL_RED);
+    m_items.push_back(BLOCK_WOOL_BLACK);
+    m_items.push_back(BLOCK_WOOL_GREY);
+    m_items.push_back(BLOCK_WOOL_PINK);
+    m_items.push_back(BLOCK_WOOL_LIME_GREEN);
+    m_items.push_back(BLOCK_WOOL_GREEN);
+    m_items.push_back(BLOCK_WOOL_BROWN);
+    m_items.push_back(BLOCK_WOOL_YELLOW);
+    m_items.push_back(BLOCK_WOOL_LIGHT_BLUE);
+    m_items.push_back(BLOCK_WOOL_BLUE);
+    m_items.push_back(BLOCK_WOOL_PURPLE);
+    m_items.push_back(BLOCK_WOOL_VIOLET);
+    m_items.push_back(BLOCK_WOOL_TURQUOISE);
+    m_items.push_back(BLOCK_WOOL_ORANGE);
 }
 
 void Inventory::toggle()
@@ -169,35 +183,38 @@ void Inventory::toggle()
 void Inventory::update(float /*dt*/, Camera &/*camera*/)
 {
     if (!m_isOpen) return;
-
+    
     int mouseX, mouseY;
     Uint32 mState = SDL_GetMouseState(&mouseX, &mouseY);
     bool leftClick = (mState & SDL_BUTTON(SDL_BUTTON_LEFT)) != 0;
-
     if(leftClick)
     {
-        // Invert Y for bottom-left style UI coordinates
-        int invY = SCREEN_HEIGHT - mouseY;
-
-        float regionWidth  = 400.0f;
-        float regionHeight = 200.0f;
-        float regionX = (SCREEN_WIDTH  - regionWidth ) * 0.5f;
-        float regionY = (SCREEN_HEIGHT - regionHeight) * 0.5f;
-
         float itemSize = 64.0f;
         float spacing = 10.0f;
+        int columns = 9;
         size_t count = m_items.size();
-        float rowWidth = (count * itemSize) + (count - 1) * spacing;
-        float startX = regionX + (regionWidth - rowWidth) * 0.5f;
-        float startY = regionY + (regionHeight * 0.5f - itemSize * 0.5f);
-
+        int rows = (count + columns - 1) / columns;
+        
+        float gridWidth = columns * itemSize + (columns - 1) * spacing;
+        float gridHeight = rows * itemSize + (rows - 1) * spacing;
+        float margin = 20.0f;
+        
+        float regionWidth = gridWidth + 2 * margin;
+        float regionHeight = gridHeight + 2 * margin;
+        float regionX = (SCREEN_WIDTH - regionWidth) * 0.5f;
+        float regionY = (SCREEN_HEIGHT - regionHeight) * 0.5f;
+        
+        // Top-left corner of grid (drawing from the top)
+        float startX = regionX + margin;
+        float startY = regionY + regionHeight - margin - itemSize;
+        
         for(size_t i = 0; i < count; i++){
-            float x = startX + i * (itemSize + spacing);
-            float y = startY;
-            float w = itemSize;
-            float h = itemSize;
-            if(mouseX >= x && mouseX <= (x + w) &&
-               invY   >= y && invY   <= (y + h))
+            int row = i / columns;
+            int col = i % columns;
+            float x = startX + col * (itemSize + spacing);
+            float y = startY - row * (itemSize + spacing);
+            if(mouseX >= x && mouseX <= (x + itemSize) &&
+               (SCREEN_HEIGHT - mouseY) >= y && (SCREEN_HEIGHT - mouseY) <= (y + itemSize))
             {
                 m_selectedBlock = m_items[i];
                 std::cout << "[Inventory] Selected block: " << m_selectedBlock << std::endl;
@@ -210,10 +227,23 @@ void Inventory::render()
 {
     if(!m_isOpen) return;
     glDisable(GL_DEPTH_TEST);
-    float regionWidth  = 400.0f;
-    float regionHeight = 200.0f;
-    float regionX = (SCREEN_WIDTH  - regionWidth ) * 0.5f;
+    
+    float itemSize = 64.0f;
+    float spacing = 10.0f;
+    int columns = 9;
+    size_t count = m_items.size();
+    int rows = (count + columns - 1) / columns;
+    
+    float gridWidth = columns * itemSize + (columns - 1) * spacing;
+    float gridHeight = rows * itemSize + (rows - 1) * spacing;
+    float margin = 20.0f;
+    
+    float regionWidth = gridWidth + 2 * margin;
+    float regionHeight = gridHeight + 2 * margin;
+    float regionX = (SCREEN_WIDTH - regionWidth) * 0.5f;
     float regionY = (SCREEN_HEIGHT - regionHeight) * 0.5f;
+    
+    // Draw the background UI box
     glUseProgram(uiShader);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -221,25 +251,25 @@ void Inventory::render()
                0.0f, 0.0f, 0.0f, 0.7f,
                SCREEN_WIDTH, SCREEN_HEIGHT);
     glDisable(GL_BLEND);
-    float itemSize = 64.0f;
-    float spacing = 10.0f;
-    size_t count = m_items.size();
-    float rowWidth = (count * itemSize) + (count - 1) * spacing;
-    float startX = regionX + (regionWidth - rowWidth) * 0.5f;
-    float startY = regionY + (regionHeight * 0.5f - itemSize * 0.5f);
-
-    // Determine mouse position for hover detection
+    
+    // Top-left of the grid (items are drawn from top down)
+    float startX = regionX + margin;
+    float startY = regionY + regionHeight - margin - itemSize;
+    
     int mouseX, mouseY;
     Uint32 mState = SDL_GetMouseState(&mouseX, &mouseY);
     int invMouseY = SCREEN_HEIGHT - mouseY;
-
+    
     for(size_t i = 0; i < count; i++){
-        float x = startX + i * (itemSize + spacing);
-        float y = startY;
-        bool hovered = (mouseX >= x && mouseX <= (x + itemSize) && invMouseY >= y && invMouseY <= (y + itemSize));
-        // Draw the preview with rotation only if hovered; otherwise static.
+        int row = i / columns;
+        int col = i % columns;
+        float x = startX + col * (itemSize + spacing);
+        float y = startY - row * (itemSize + spacing);
+        bool hovered = (mouseX >= x && mouseX <= (x + itemSize) &&
+                        invMouseY >= y && invMouseY <= (y + itemSize));
         drawBlockPreview(m_items[i], x, y, itemSize, hovered);
     }
+    
     glEnable(GL_DEPTH_TEST);
 }
 
