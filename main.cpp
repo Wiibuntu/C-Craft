@@ -28,7 +28,7 @@ int SCREEN_HEIGHT = 720;
 // Terrain parameters
 // -----------------------------------------------------------------------------
 static const int chunkSize      = 16;
-static const int renderDistance = 8;
+static const int renderDistance = 6;
 
 // -----------------------------------------------------------------------------
 // Player and world limits
@@ -171,6 +171,22 @@ static bool checkCollision(const Vec3 &pos)
 }
 
 // -----------------------------------------------------------------------------
+// Helper: Determine if water can flow into a cell (only into air, not into solid blocks)
+// -----------------------------------------------------------------------------
+bool canWaterFlowInto(int x, int y, int z) {
+    std::tuple<int,int,int> key = {x, y, z};
+    if(extraBlocks.find(key) != extraBlocks.end())
+        return false;
+    Biome b = getBiome(x, z);
+    if(b != BIOME_OCEAN) {
+        int terrainHeight = getTerrainHeightAt(x, z);
+        if(y <= terrainHeight)
+            return false;
+    }
+    return true;
+}
+
+// -----------------------------------------------------------------------------
 // Forward declaration for rebuildChunk so that updateWaterFlow can use it.
 // -----------------------------------------------------------------------------
 static void rebuildChunk(int cx, int cz);
@@ -226,8 +242,8 @@ static void updateWaterFlow(const Camera &camera, float /*dt*/)
 
         int level = waterLevels[key];
 
-        // Flow downward
-        if(y > 0 && !isSolidBlock(x, y - 1, z))
+        // Flow downward: only if the cell below is air.
+        if(y > 0 && canWaterFlowInto(x, y - 1, z))
         {
             std::tuple<int,int,int> below = {x, y - 1, z};
             int belowLevel = 0;
@@ -242,7 +258,7 @@ static void updateWaterFlow(const Camera &camera, float /*dt*/)
             }
         }
 
-        // Horizontal spread: only if water level > 1
+        // Horizontal spread: only if water level > 1 and target cell is air.
         if(level > 1)
         {
             int offsets[4][3] = { {1,0,0}, {-1,0,0}, {0,0,1}, {0,0,-1} };
@@ -251,6 +267,8 @@ static void updateWaterFlow(const Camera &camera, float /*dt*/)
                 int nx = x + offsets[i][0];
                 int ny = y;
                 int nz = z + offsets[i][2];
+                if(!canWaterFlowInto(nx, ny, nz))
+                    continue;
                 std::tuple<int,int,int> neighbor = {nx, ny, nz};
                 int neighborLevel = 0;
                 if(waterLevels.find(neighbor) != waterLevels.end())
@@ -856,6 +874,9 @@ int main(int /*argc*/, char* /*argv*/[])
             SDL_GL_SwapWindow(window);
             continue;
         }
+        // Ensure blending is enabled for world rendering (to maintain transparency)
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         if(!inventory.isOpen()){
             const Uint8* keys = SDL_GetKeyboardState(nullptr);
             float speed = 10.0f * dt;

@@ -36,7 +36,6 @@ const float leavesTileX = 4.0f, leavesTileY = 12.0f;
 // Water block:
 const float waterTileX = 13.0f, waterTileY = 3.0f; // pick an empty tile
 
-// New blocks UV coordinates (example values)
 // Wooden Planks:
 const float woodenPlanksTileX = 4.0f, woodenPlanksTileY = 15.0f;
 // Cobblestone:
@@ -73,6 +72,17 @@ void getTileUV(float tileX, float tileY, float uv[4][2]) {
     uv[1][0] = (tileX + 1) * tileSize; uv[1][1] = tileY * tileSize;
     uv[2][0] = (tileX + 1) * tileSize; uv[2][1] = (tileY + 1) * tileSize;
     uv[3][0] = tileX * tileSize;       uv[3][1] = (tileY + 1) * tileSize;
+}
+
+// New helper function for water tile UV coordinates to blend water textures
+void getWaterTileUV(float tileX, float tileY, float uv[4][2]) {
+    float inset = 0.01f; // Inset factor for water blending
+    float adjustedTileSize = tileSize * (1 - 2 * inset);
+    float offset = tileSize * inset;
+    uv[0][0] = tileX * tileSize + offset;       uv[0][1] = tileY * tileSize + offset;
+    uv[1][0] = tileX * tileSize + offset + adjustedTileSize; uv[1][1] = tileY * tileSize + offset;
+    uv[2][0] = tileX * tileSize + offset + adjustedTileSize; uv[2][1] = tileY * tileSize + offset + adjustedTileSize;
+    uv[3][0] = tileX * tileSize + offset;       uv[3][1] = tileY * tileSize + offset + adjustedTileSize;
 }
 
 // addCube: Generates geometry for a cube at (x,y,z) using textures selected by blockType.
@@ -116,9 +126,10 @@ void addCube(std::vector<float>& vertices, float x, float y, float z, BlockType 
         getTileUV(leavesTileX, leavesTileY, uvSide);
         getTileUV(leavesTileX, leavesTileY, uvBottom);
     } else if (blockType == BLOCK_WATER) {
-        getTileUV(waterTileX, waterTileY, uvTop);
-        getTileUV(waterTileX, waterTileY, uvSide);
-        getTileUV(waterTileX, waterTileY, uvBottom);
+        // Use water-specific UVs for blending water textures.
+        getWaterTileUV(waterTileX, waterTileY, uvTop);
+        getWaterTileUV(waterTileX, waterTileY, uvSide);
+        getWaterTileUV(waterTileX, waterTileY, uvBottom);
     }
     // New blocks:
     else if (blockType == BLOCK_WOODEN_PLANKS) {
