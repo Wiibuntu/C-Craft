@@ -1,5 +1,6 @@
 #include "cube.h"
-#include <cstdlib>  // for rand()
+#include "world.h"   // For isSolidBlock()
+#include <cstdlib>   // for rand()
 #include <vector>
 
 // We assume a texture atlas that is 16x16 tiles.
@@ -86,7 +87,9 @@ void getWaterTileUV(float tileX, float tileY, float uv[4][2]) {
 }
 
 // addCube: Generates geometry for a cube at (x,y,z) using textures selected by blockType.
-void addCube(std::vector<float>& vertices, float x, float y, float z, BlockType blockType) {
+// If cullFaces is true, only faces not adjacent to a solid block are added.
+void addCube(std::vector<float>& vertices, float x, float y, float z, BlockType blockType, bool cullFaces)
+{
     float uvTop[4][2], uvSide[4][2], uvBottom[4][2];
     
     // Select the UV coordinates based on the block type.
@@ -223,8 +226,13 @@ void addCube(std::vector<float>& vertices, float x, float y, float z, BlockType 
     float y0 = y,     y1 = y + 1;
     float z0 = z,     z1 = z + 1;
     
-    // Front face (z = z1)
-    {
+    // For neighbor checks, convert coordinates to int (assuming blocks are aligned)
+    int bx = static_cast<int>(x);
+    int by = static_cast<int>(y);
+    int bz = static_cast<int>(z);
+    
+    // Front face (z+)
+    if (!cullFaces || !isSolidBlock(bx, by, bz + 1)) {
         vertices.insert(vertices.end(), { x0, y0, z1, uvSide[0][0], uvSide[0][1] });
         vertices.insert(vertices.end(), { x1, y0, z1, uvSide[1][0], uvSide[1][1] });
         vertices.insert(vertices.end(), { x1, y1, z1, uvSide[2][0], uvSide[2][1] });
@@ -233,8 +241,8 @@ void addCube(std::vector<float>& vertices, float x, float y, float z, BlockType 
         vertices.insert(vertices.end(), { x0, y1, z1, uvSide[3][0], uvSide[3][1] });
     }
     
-    // Back face (z = z0)
-    {
+    // Back face (z-)
+    if (!cullFaces || !isSolidBlock(bx, by, bz - 1)) {
         vertices.insert(vertices.end(), { x1, y0, z0, uvSide[0][0], uvSide[0][1] });
         vertices.insert(vertices.end(), { x0, y0, z0, uvSide[1][0], uvSide[1][1] });
         vertices.insert(vertices.end(), { x0, y1, z0, uvSide[2][0], uvSide[2][1] });
@@ -243,8 +251,8 @@ void addCube(std::vector<float>& vertices, float x, float y, float z, BlockType 
         vertices.insert(vertices.end(), { x1, y1, z0, uvSide[3][0], uvSide[3][1] });
     }
     
-    // Left face (x = x0)
-    {
+    // Left face (x-)
+    if (!cullFaces || !isSolidBlock(bx - 1, by, bz)) {
         vertices.insert(vertices.end(), { x0, y0, z0, uvSide[0][0], uvSide[0][1] });
         vertices.insert(vertices.end(), { x0, y0, z1, uvSide[1][0], uvSide[1][1] });
         vertices.insert(vertices.end(), { x0, y1, z1, uvSide[2][0], uvSide[2][1] });
@@ -253,8 +261,8 @@ void addCube(std::vector<float>& vertices, float x, float y, float z, BlockType 
         vertices.insert(vertices.end(), { x0, y1, z0, uvSide[3][0], uvSide[3][1] });
     }
     
-    // Right face (x = x1)
-    {
+    // Right face (x+)
+    if (!cullFaces || !isSolidBlock(bx + 1, by, bz)) {
         vertices.insert(vertices.end(), { x1, y0, z1, uvSide[0][0], uvSide[0][1] });
         vertices.insert(vertices.end(), { x1, y0, z0, uvSide[1][0], uvSide[1][1] });
         vertices.insert(vertices.end(), { x1, y1, z0, uvSide[2][0], uvSide[2][1] });
@@ -263,8 +271,8 @@ void addCube(std::vector<float>& vertices, float x, float y, float z, BlockType 
         vertices.insert(vertices.end(), { x1, y1, z1, uvSide[3][0], uvSide[3][1] });
     }
     
-    // Top face (y = y1)
-    {
+    // Top face (y+)
+    if (!cullFaces || !isSolidBlock(bx, by + 1, bz)) {
         vertices.insert(vertices.end(), { x0, y1, z1, uvTop[0][0], uvTop[0][1] });
         vertices.insert(vertices.end(), { x1, y1, z1, uvTop[1][0], uvTop[1][1] });
         vertices.insert(vertices.end(), { x1, y1, z0, uvTop[2][0], uvTop[2][1] });
@@ -273,8 +281,8 @@ void addCube(std::vector<float>& vertices, float x, float y, float z, BlockType 
         vertices.insert(vertices.end(), { x0, y1, z0, uvTop[3][0], uvTop[3][1] });
     }
     
-    // Bottom face (y = y0)
-    {
+    // Bottom face (y-)
+    if (!cullFaces || !isSolidBlock(bx, by - 1, bz)) {
         vertices.insert(vertices.end(), { x0, y0, z0, uvBottom[0][0], uvBottom[0][1] });
         vertices.insert(vertices.end(), { x1, y0, z0, uvBottom[1][0], uvBottom[1][1] });
         vertices.insert(vertices.end(), { x1, y0, z1, uvBottom[2][0], uvBottom[2][1] });

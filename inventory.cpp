@@ -121,7 +121,8 @@ static void drawBlockPreview(int blockID, float x, float y, float size, bool hov
     }
     std::vector<float> verts;
     verts.reserve(36*5);
-    addCube(verts, 0.0f, 0.0f, 0.0f, (BlockType)blockID);
+    // For preview, disable face culling so all faces are shown.
+    addCube(verts, 0.0f, 0.0f, 0.0f, (BlockType)blockID, false);
 
     glBindVertexArray(previewVAO);
     glBindBuffer(GL_ARRAY_BUFFER, previewVBO);
@@ -140,7 +141,7 @@ static void drawBlockPreview(int blockID, float x, float y, float size, bool hov
 //
 Inventory::Inventory()
     : m_isOpen(false)
-    , m_selectedBlock(BLOCK_GRASS)
+    , m_selectedBlock(BLOCK_NONE)
 {
     // Original blocks
     m_items.push_back(BLOCK_GRASS);

@@ -19,5 +19,8 @@ bool loadWorld(const char* filename, int &outSeed,
 bool saveWorld(const char* filename, int seed,
                float playerX, float playerY, float playerZ);
 
+// Returns true if the block at the given coordinates is solid.
+bool isSolidBlock(int bx, int by, int bz);
+
 #endif
 

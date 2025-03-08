@@ -5,6 +5,7 @@
 
 // Block types used for terrain and extra features.
 enum BlockType {
+    BLOCK_NONE = -1,
     BLOCK_GRASS,
     BLOCK_DIRT,
     BLOCK_STONE,
@@ -39,7 +40,9 @@ enum BlockType {
 
 // Adds a cube at position (x,y,z) with textures chosen based on the block type.
 // Each vertex is defined with 3 position floats and 2 UV floats.
-void addCube(std::vector<float>& vertices, float x, float y, float z, BlockType blockType);
+// If cullFaces is true (the default), then only faces adjacent to air (or non-solid blocks)
+// are added.
+void addCube(std::vector<float>& vertices, float x, float y, float z, BlockType blockType, bool cullFaces = true);
 
 #endif // CUBE_H
 
