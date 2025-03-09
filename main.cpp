@@ -23,7 +23,7 @@
 #define BLOCK_NONE -1
 #endif
 
-// Forward declarations for functions defined later:
+// Forward declarations for UI functions.
 int drawPauseMenu(int screenW, int screenH);
 void drawFlyIndicator(bool isFlying, int screenW, int screenH);
 void drawFirstPersonHand3D(int screenW, int screenH, const Mat4 &proj);
@@ -119,7 +119,7 @@ int getTerrainHeightAt(int x, int z)
 {
     Biome b = getBiome(x, z);
     if(b == BIOME_OCEAN)
-        return 8;
+        return 8; // For ocean: 6 water layers + 1 sand + 1 bedrock
     if(b == BIOME_EXTREME_HILLS)
     {
         float freq = 0.0007f;
@@ -186,7 +186,7 @@ static bool checkCollision(const Vec3 &pos)
 }
 
 // -----------------------------------------------------------------------------
-// Helper: Determine if water can flow into a cell
+// Helper: Determine if water can flow into a cell (only into air)
 // -----------------------------------------------------------------------------
 bool canWaterFlowInto(int x, int y, int z) {
     std::tuple<int,int,int> key = {x, y, z};
@@ -207,7 +207,7 @@ bool canWaterFlowInto(int x, int y, int z) {
 static void rebuildChunk(int cx, int cz);
 
 // -----------------------------------------------------------------------------
-// adjustPlayerSpawn
+// adjustPlayerSpawn: Moves the player upward until no collision.
 // -----------------------------------------------------------------------------
 void adjustPlayerSpawn(Camera &camera)
 {
@@ -226,7 +226,7 @@ void adjustPlayerSpawn(Camera &camera)
 }
 
 // -----------------------------------------------------------------------------
-// Water Flow Update
+// Basic Water Spreading Function
 // -----------------------------------------------------------------------------
 static const int NEAR_CHUNK_RADIUS = 2;
 
@@ -367,15 +367,16 @@ static Chunk generateChunk(int cx, int cz)
                         extraBlocks[{wx, ty, wz}] = BLOCK_TREE_LOG;
                     }
                     int topY = baseY + trunkH - 1;
+                    // IMPORTANT: For tree leaves, disable face culling so the tree never spawns invisible.
                     for(int lx2 = wx - 1; lx2 <= wx + 1; lx2++){
                         for(int lz2 = wz - 1; lz2 <= wz + 1; lz2++){
                             if(lx2 == wx && lz2 == wz)
                                 continue;
-                            addCube(verts, (float)lx2, (float)topY, (float)lz2, BLOCK_LEAVES, true);
+                            addCube(verts, (float)lx2, (float)topY, (float)lz2, BLOCK_LEAVES, false);
                             extraBlocks[{lx2, topY, lz2}] = BLOCK_LEAVES;
                         }
                     }
-                    addCube(verts, (float)wx, (float)(topY + 1), (float)wz, BLOCK_LEAVES, true);
+                    addCube(verts, (float)wx, (float)(topY + 1), (float)wz, BLOCK_LEAVES, false);
                     extraBlocks[{wx, topY + 1, wz}] = BLOCK_LEAVES;
                 }
             }
@@ -572,7 +573,7 @@ int drawPauseMenu(int screenW, int screenH)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glUseProgram(uiShader);
 
-    // Draw full-screen semi-transparent overlay.
+    // Full-screen semi-transparent overlay.
     float overlayVerts[12] = { 0, 0, (float)screenW, 0, (float)screenW, (float)screenH,
                                0, 0, (float)screenW, (float)screenH, 0, (float)screenH };
     glBindVertexArray(uiVAO);
@@ -589,35 +590,30 @@ int drawPauseMenu(int screenW, int screenH)
     glUniform4f(glGetUniformLocation(uiShader, "uColor"), 0.0f, 0.0f, 0.0f, 0.5f);
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
-    // Define Resume button rectangle.
+    // Resume button (blue)
     float resumeX = 300, resumeY = 250, resumeW = 200, resumeH = 50;
     float resumeVerts[12] = { resumeX, resumeY, resumeX+resumeW, resumeY, resumeX+resumeW, resumeY+resumeH,
-                               resumeX, resumeY, resumeX+resumeW, resumeY+resumeH, resumeX, resumeY+resumeH };
+                              resumeX, resumeY, resumeX+resumeW, resumeY+resumeH, resumeX, resumeY+resumeH };
     glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(resumeVerts), resumeVerts);
-    // Resume button: blue color.
     glUniform4f(glGetUniformLocation(uiShader, "uColor"), 0.2f, 0.6f, 1.0f, 1.0f);
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
-    // Define Quit button rectangle.
+    // Quit button (red)
     float quitX = 300, quitY = 150, quitW = 200, quitH = 50;
     float quitVerts[12] = { quitX, quitY, quitX+quitW, quitY, quitX+quitW, quitY+quitH,
-                             quitX, quitY, quitX+quitW, quitY+quitH, quitX, quitY+quitH };
+                            quitX, quitY, quitX+quitW, quitY+quitH, quitX, quitY+quitH };
     glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(quitVerts), quitVerts);
-    // Quit button: red color.
     glUniform4f(glGetUniformLocation(uiShader, "uColor"), 1.0f, 0.3f, 0.3f, 1.0f);
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
-    // Check mouse state for clicks.
     int mx, my;
     Uint32 mState = SDL_GetMouseState(&mx, &my);
     bool leftDown = (mState & SDL_BUTTON(SDL_BUTTON_LEFT)) != 0;
-    int invY = screenH - my;  // Invert mouse Y coordinate.
+    int invY = screenH - my;
     int result = 0;
     if(leftDown) {
-        // Check Resume button.
         if(mx >= resumeX && mx <= resumeX+resumeW && invY >= resumeY && invY <= resumeY+resumeH)
             result = 1;
-        // Check Quit button.
         else if(mx >= quitX && mx <= quitX+quitW && invY >= quitY && invY <= quitY+quitH)
             result = 2;
     }
@@ -659,7 +655,7 @@ void drawFlyIndicator(bool isFlying, int screenW, int screenH)
 // -----------------------------------------------------------------------------
 void drawFirstPersonHand3D(int screenW, int screenH, const Mat4 &proj)
 {
-    // Define a simple hand model (a rectangular prism)
+    // Simple hand model: a rectangular prism.
     float w = 0.3f, h = 0.5f, d = 0.1f;
     float vertices[] = {
         // Front face
@@ -719,11 +715,11 @@ void drawFirstPersonHand3D(int screenW, int screenH, const Mat4 &proj)
 
     // Build model matrix to position the hand in camera space.
     Mat4 handModel = identityMatrix();
-    // Translate hand to desired offset in camera space.
+    // Translate hand relative to the camera (tweak these values as needed).
     handModel.m[12] = 0.6f;  // right
     handModel.m[13] = -0.6f; // down
     handModel.m[14] = 1.0f;  // forward
-    // Apply slight Y-axis rotation (15 degrees)
+    // Apply a slight rotation around the Y-axis (15 degrees).
     float angle = 15.0f * (3.14159f / 180.0f);
     Mat4 rotY = identityMatrix();
     rotY.m[0] = cos(angle);  rotY.m[2] = sin(angle);
@@ -747,7 +743,7 @@ void drawFirstPersonHand3D(int screenW, int screenH, const Mat4 &proj)
 }
 
 // -----------------------------------------------------------------------------
-// Utility: get chunk coordinates from block coordinates
+// Utility: Get chunk coordinates from block coordinates.
 // -----------------------------------------------------------------------------
 static void getChunkCoords(int bx, int bz, int &cx, int &cz)
 {
@@ -756,7 +752,7 @@ static void getChunkCoords(int bx, int bz, int &cx, int &cz)
 }
 
 // -----------------------------------------------------------------------------
-// Main loop and Tick System
+// Main Loop and Tick System
 // -----------------------------------------------------------------------------
 static const float TICK_INTERVAL = 0.5f; // seconds per tick
 
@@ -829,7 +825,7 @@ int main(int /*argc*/, char* /*argv*/[])
         return -1;
     }
     initUI();
-    Inventory inventory;  // Ensure its m_selectedBlock is initialized to BLOCK_NONE.
+    Inventory inventory;  // Ensure its m_selectedBlock defaults to BLOCK_NONE.
     int spawnChunkX = (int)std::floor(loadedX / (float)chunkSize);
     int spawnChunkZ = (int)std::floor(loadedZ / (float)chunkSize);
     std::pair<int,int> chunkKey = {spawnChunkX, spawnChunkZ};
@@ -1096,7 +1092,7 @@ int main(int /*argc*/, char* /*argv*/[])
         glUseProgram(uiShader);
         drawFlyIndicator(isFlying, SCREEN_WIDTH, SCREEN_HEIGHT);
         inventory.render();
-        // Render the hand model unless a block is selected.
+        // Render the 3D hand unless a block is selected.
         if(inventory.getSelectedBlock() == BLOCK_NONE) {
             glDisable(GL_DEPTH_TEST);
             drawFirstPersonHand3D(SCREEN_WIDTH, SCREEN_HEIGHT, projWorld);
