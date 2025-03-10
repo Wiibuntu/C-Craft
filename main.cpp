@@ -9,16 +9,16 @@
 #include <ctime>
 
 #include "math.h"       // Provides identityMatrix(), multiplyMatrix(), vector math, etc.
-#include "shader.h"     // Shader compilation and program creation :contentReference[oaicite:0]{index=0}, :contentReference[oaicite:1]{index=1}
-#include "cube.h"       // Contains BlockType definitions and addCube() :contentReference[oaicite:2]{index=2}, :contentReference[oaicite:3]{index=3}
+#include "shader.h"     // Shader compilation and program creation
+#include "cube.h"       // Contains BlockType definitions and addCube()
 #include "camera.h"
-#include "texture.h"    // loadTexture() :contentReference[oaicite:4]{index=4}, :contentReference[oaicite:5]{index=5}
+#include "texture.h"    // loadTexture()
 #include "noise.h"
 #include "world.h"
 #include "inventory.h"
 #include "globals.h"
 
-// Global texture variables must be declared before use.
+// Global texture variable for the hand.
 GLuint handTex = 0;
 
 #ifndef BLOCK_NONE
@@ -30,7 +30,7 @@ int drawPauseMenu(int screenW, int screenH);
 void drawFlyIndicator(bool isFlying, int screenW, int screenH);
 void drawFirstPersonHand3D(int screenW, int screenH, const Mat4 &proj); // (unused in new approach)
 
-// --- New helper functions for constructing model matrices ---
+// --- Helper functions for constructing model matrices ---
 Mat4 translateMatrix(float tx, float ty, float tz) {
     Mat4 mat = identityMatrix();
     mat.m[12] = tx;
@@ -72,7 +72,7 @@ static bool raycastBlock(const Vec3 &start, const Vec3 &dir, float maxDist, int 
     return false;
 }
 
-// --- New function to render the held block as a 3D cube (unchanged) ---
+// --- Render the held block as a 3D cube (unchanged) ---
 void renderHeldBlock3D(const Mat4 &proj, int activeBlock) {
     Mat4 model = identityMatrix();
     model = multiplyMatrix(model, translateMatrix(0.8f, -0.8f, -1.5f));
@@ -116,10 +116,9 @@ void renderHeldBlock3D(const Mat4 &proj, int activeBlock) {
     glDeleteVertexArrays(1, &heldVAO);
 }
 
-// --- New function to render the hand as a flat 3D rectangle ---
-// (This function has been modified so that the hand appears more forward)
+// --- Render the hand as a flat 3D rectangle ---
+// The translation in Z is set to -0.8f so the hand appears closer, as if the player is reaching forward.
 void renderHandRect(const Mat4 &proj) {
-    // Define a quad (two triangles) in local space.
     float handVerts[] = {
         // positions       // UVs
          0.0f,  0.0f, 0.0f,   0.0f, 0.0f,
@@ -131,14 +130,12 @@ void renderHandRect(const Mat4 &proj) {
          0.0f,  1.0f, 0.0f,   0.0f, 1.0f
     };
     
-    // Build a model matrix to position the hand rectangle in the player's hand.
     Mat4 model = identityMatrix();
-    // Translate so that the rectangle appears more forward (closer to the viewer).
-    // Changed the Z translation from -1.5f to -0.8f.
-    model = multiplyMatrix(model, translateMatrix(0.8f, -0.6f, -2.0f));
+    // Translate so that the hand appears more forward.
+    model = multiplyMatrix(model, translateMatrix(0.8f, -0.8f, -0.8f));
     // Optionally, rotate the rectangle slightly.
     Mat4 rotZ = identityMatrix();
-    float angle = 1.0f; // radians, adjust to taste
+    float angle = 0.2f; // radians
     rotZ.m[0] = cos(angle);
     rotZ.m[1] = -sin(angle);
     rotZ.m[4] = sin(angle);
@@ -147,7 +144,6 @@ void renderHandRect(const Mat4 &proj) {
     // Scale the rectangle to a desired size.
     model = multiplyMatrix(model, scaleMatrix(0.7f, 0.4f, 1.0f));
     
-    // For a held item, we render in camera space (view = identity), so we combine only with proj.
     Mat4 mvp = multiplyMatrix(proj, model);
     
     glUseProgram(worldShader);
@@ -554,25 +550,54 @@ static void rebuildChunk(int cx, int cz) {
 
 // -----------------------------------------------------------------------------
 // Shaders and UI drawing functions.
+// Updated world shaders now include a specular term and use the texture alpha.
 static const char* worldVertSrc = R"(
 #version 330 core
-layout(location=0) in vec3 aPos;
-layout(location=1) in vec2 aTex;
-out vec2 TexCoord;
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec2 aTex;
 uniform mat4 MVP;
+out vec3 FragPos;
+out vec2 TexCoord;
 void main(){
     gl_Position = MVP * vec4(aPos, 1.0);
+    // For terrain cubes, aPos is assumed to be in world space.
+    FragPos = aPos;
     TexCoord = aTex;
 }
 )";
 
 static const char* worldFragSrc = R"(
 #version 330 core
+in vec3 FragPos;
 in vec2 TexCoord;
 out vec4 FragColor;
 uniform sampler2D ourTexture;
+uniform vec3 sunDirection;  // Directional light (normalized)
+uniform vec3 viewPos;       // Camera position in world space
 void main(){
-    FragColor = texture(ourTexture, TexCoord);
+    // Compute normal using screen-space derivatives.
+    vec3 dx = dFdx(FragPos);
+    vec3 dy = dFdy(FragPos);
+    vec3 normal = normalize(cross(dx, dy));
+    
+    // Diffuse component.
+    float diff = max(dot(normal, sunDirection), 0.0);
+    
+    // Specular component.
+    vec3 viewDir = normalize(viewPos - FragPos);
+    vec3 reflectDir = reflect(-sunDirection, normal);
+    float spec = pow(max(dot(viewDir, reflectDir), 0.0), 16.0);
+    
+    vec3 ambient = vec3(0.4);
+    vec3 diffuse = vec3(0.6) * diff;
+    vec3 specular = vec3(0.2) * spec;
+    vec3 lighting = ambient + diffuse + specular;
+    
+    vec4 texColor = texture(ourTexture, TexCoord);
+    if(texColor.a < 0.1)
+        discard;
+    
+    FragColor = vec4(texColor.rgb * lighting, texColor.a);
 }
 )";
 
@@ -991,6 +1016,11 @@ int main(int /*argc*/, char* /*argv*/[]) {
         glBindTexture(GL_TEXTURE_2D, texID);
         GLint uniTex = glGetUniformLocation(worldShader, "ourTexture");
         glUniform1i(uniTex, 0);
+        // Set directional light and view position for realistic lighting.
+        Vec3 sunDir = normalize({0.3f, 1.0f, 0.3f});
+        glUniform3f(glGetUniformLocation(worldShader, "sunDirection"), sunDir.x, sunDir.y, sunDir.z);
+        glUniform3f(glGetUniformLocation(worldShader, "viewPos"), camera.position.x, camera.position.y, camera.position.z);
+        
         Vec3 eyePos = camera.position; eyePos.y += 1.6f;
         Vec3 viewDir = { cos(camera.yaw)*cos(camera.pitch),
                          sin(camera.pitch),
