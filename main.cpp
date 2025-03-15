@@ -47,6 +47,18 @@ Mat4 scaleMatrix(float sx, float sy, float sz) {
     return mat;
 }
 
+// --- Additional helper functions ---
+static float smoothstep(float edge0, float edge1, float x) {
+    float t = (x - edge0) / (edge1 - edge0);
+    if(t < 0) t = 0;
+    if(t > 1) t = 1;
+    return t * t * (3 - 2 * t);
+}
+
+static float mix(float a, float b, float t) {
+    return a + t * (b - a);
+}
+
 // --- Global constant for tick timing ---
 static const float TICK_INTERVAL = 0.5f; // seconds per tick
 
@@ -63,11 +75,11 @@ static bool raycastBlock(const Vec3 &start, const Vec3 &dir, float maxDist, int 
         int bz = (int)std::floor(pos.z);
         std::tuple<int,int,int> key = {bx, by, bz};
         if(isSolidBlock(bx, by, bz) ||
-           (extraBlocks.find(key) != extraBlocks.end() && extraBlocks[key] == BLOCK_LEAVES)) {
+            (extraBlocks.find(key) != extraBlocks.end() && extraBlocks[key] == BLOCK_LEAVES)) {
             outX = bx; outY = by; outZ = bz;
-            return true;
-        }
-        traveled += step;
+        return true;
+            }
+            traveled += step;
     }
     return false;
 }
@@ -85,7 +97,7 @@ void renderHeldBlock3D(const Mat4 &proj, int activeBlock) {
     model = multiplyMatrix(model, rotY);
     model = multiplyMatrix(model, scaleMatrix(0.5f, 0.5f, 0.5f));
     Mat4 mvp = multiplyMatrix(proj, model);
-    
+
     glUseProgram(worldShader);
     GLint mvpLoc = glGetUniformLocation(worldShader, "MVP");
     glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, mvp.m);
@@ -93,11 +105,11 @@ void renderHeldBlock3D(const Mat4 &proj, int activeBlock) {
     glBindTexture(GL_TEXTURE_2D, texID);
     GLint texLoc = glGetUniformLocation(worldShader, "ourTexture");
     glUniform1i(texLoc, 0);
-    
+
     std::vector<float> verts;
     verts.reserve(36 * 5);
     addCube(verts, 0.0f, 0.0f, 0.0f, (BlockType)activeBlock, false);
-    
+
     GLuint heldVAO, heldVBO;
     glGenVertexArrays(1, &heldVAO);
     glGenBuffers(1, &heldVBO);
@@ -108,32 +120,29 @@ void renderHeldBlock3D(const Mat4 &proj, int activeBlock) {
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
     glEnableVertexAttribArray(1);
-    
+
     glDrawArrays(GL_TRIANGLES, 0, 36);
-    
+
     glBindVertexArray(0);
     glDeleteBuffers(1, &heldVBO);
     glDeleteVertexArrays(1, &heldVAO);
 }
 
 // --- Render the hand as a flat 3D rectangle ---
-// The translation in Z is set to -0.8f so the hand appears closer, as if the player is reaching forward.
 void renderHandRect(const Mat4 &proj) {
     float handVerts[] = {
         // positions       // UVs
-         0.0f,  0.0f, 0.0f,   0.0f, 0.0f,
-         1.0f,  0.0f, 0.0f,   1.0f, 0.0f,
-         1.0f,  1.0f, 0.0f,   1.0f, 1.0f,
-         
-         0.0f,  0.0f, 0.0f,   0.0f, 0.0f,
-         1.0f,  1.0f, 0.0f,   1.0f, 1.0f,
-         0.0f,  1.0f, 0.0f,   0.0f, 1.0f
+        0.0f,  0.0f, 0.0f,   0.0f, 0.0f,
+        1.0f,  0.0f, 0.0f,   1.0f, 0.0f,
+        1.0f,  1.0f, 0.0f,   1.0f, 1.0f,
+
+        0.0f,  0.0f, 0.0f,   0.0f, 0.0f,
+        1.0f,  1.0f, 0.0f,   1.0f, 1.0f,
+        0.0f,  1.0f, 0.0f,   0.0f, 1.0f
     };
-    
+
     Mat4 model = identityMatrix();
-    // Translate so that the hand appears more forward.
     model = multiplyMatrix(model, translateMatrix(0.8f, -0.8f, -0.8f));
-    // Optionally, rotate the rectangle slightly.
     Mat4 rotZ = identityMatrix();
     float angle = 0.2f; // radians
     rotZ.m[0] = cos(angle);
@@ -141,20 +150,19 @@ void renderHandRect(const Mat4 &proj) {
     rotZ.m[4] = sin(angle);
     rotZ.m[5] = cos(angle);
     model = multiplyMatrix(model, rotZ);
-    // Scale the rectangle to a desired size.
     model = multiplyMatrix(model, scaleMatrix(0.7f, 0.4f, 1.0f));
-    
+
     Mat4 mvp = multiplyMatrix(proj, model);
-    
+
     glUseProgram(worldShader);
     GLint mvpLoc = glGetUniformLocation(worldShader, "MVP");
     glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, mvp.m);
-    
+
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, handTex);
     GLint texLoc = glGetUniformLocation(worldShader, "ourTexture");
     glUniform1i(texLoc, 0);
-    
+
     GLuint handVAO, handVBO;
     glGenVertexArrays(1, &handVAO);
     glGenBuffers(1, &handVBO);
@@ -165,9 +173,9 @@ void renderHandRect(const Mat4 &proj) {
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
     glEnableVertexAttribArray(1);
-    
+
     glDrawArrays(GL_TRIANGLES, 0, 6);
-    
+
     glBindVertexArray(0);
     glDeleteBuffers(1, &handVBO);
     glDeleteVertexArrays(1, &handVAO);
@@ -175,11 +183,11 @@ void renderHandRect(const Mat4 &proj) {
 
 // -----------------------------------------------------------------------------
 // Global settings and declarations.
-int SCREEN_WIDTH  = 1280;
-int SCREEN_HEIGHT = 720;
+int SCREEN_WIDTH  = 960;
+int SCREEN_HEIGHT = 480;
 
 static const int chunkSize      = 16;
-static const int renderDistance = 6;
+static const int renderDistance = 10;
 
 static const float playerWidth  = 0.6f;
 static const float playerHeight = 1.8f;
@@ -188,16 +196,13 @@ static const float WORLD_FLOOR_LIMIT = -10.0f;
 static const float GRAVITY    = -9.81f;
 static const float JUMP_SPEED =  5.0f;
 
-// 3D pipeline globals.
 GLuint worldShader = 0;
 GLuint texID       = 0;
 
-// 2D UI pipeline globals.
 GLuint uiShader    = 0;
 GLuint uiVAO       = 0;
 GLuint uiVBO       = 0;
 
-// A chunk holds geometry for a 16x16 area.
 struct Chunk {
     int chunkX, chunkZ;
     std::vector<float> vertices;
@@ -206,7 +211,6 @@ struct Chunk {
 
 std::unordered_map<std::pair<int,int>, Chunk, PairHash> chunks;
 
-// Biome definitions.
 enum Biome {
     BIOME_PLAINS,
     BIOME_DESERT,
@@ -215,42 +219,53 @@ enum Biome {
     BIOME_OCEAN
 };
 
+// --- Revised getBiome function ---
+// Desert regions now spawn less frequently (threshold lowered),
+// while extreme hills, plains and forest are determined from combined noise.
 static Biome getBiome(int x, int z) {
     float oceanNoise = perlinNoise(x * 0.001f, z * 0.001f);
     if(oceanNoise < -0.8f)
         return BIOME_OCEAN;
-    float freq1 = 0.0035f, freq2 = 0.0037f;
-    float n1 = perlinNoise(x * freq1, z * freq1);
-    float n2 = perlinNoise((x+1000)*freq2, (z+1000)*freq2);
-    float combined = 0.5f * (n1 + n2);
-    if(combined < -0.4f)
+
+    // Lower desert frequency by using a stricter threshold.
+    float desertNoise = perlinNoise(x * 0.0007f, z * 0.0007f);
+    if(desertNoise < -0.2f)
         return BIOME_DESERT;
-    else if(combined < -0.1f)
+
+    float combined = perlinNoise(x * 0.005f, z * 0.005f);
+    if(combined < -0.1f)
         return BIOME_PLAINS;
-    else if(combined < 0.2f)
+    else if(combined < 0.0f)
         return BIOME_FOREST;
     else
         return BIOME_EXTREME_HILLS;
 }
 
+// --- New blended terrain height function ---
+// For non-ocean biomes, we blend a base height (normal terrain) with an extreme hills (mountain) height.
+// For deserts, both the normal and extreme components are lowered.
 int getTerrainHeightAt(int x, int z) {
     Biome b = getBiome(x, z);
     if(b == BIOME_OCEAN)
         return 8;
-    if(b == BIOME_EXTREME_HILLS) {
-        float freq = 0.0007f;
-        int octaves = 8;
-        float lacunarity = 2.3f, gain = 0.5f;
-        float n = fbmNoise(x * freq, z * freq, octaves, lacunarity, gain);
-        float normalized = 0.5f * (n + 1.0f);
-        if(normalized < 0.0f) normalized = 0.0f;
-        if(normalized > 1.0f) normalized = 1.0f;
-        return (int)(powf(normalized, 2.0f) * 40.0f);
-    } else {
-        float n = fbmNoise(x * 0.01f, z * 0.01f, 6, 2.0f, 0.5f);
-        float normalized = 0.5f * (n + 1.0f);
-        return (int)(normalized * 24.0f);
-    }
+
+    // Compute normal height.
+    float normalNoise = fbmNoise(x * 0.01f, z * 0.01f, 6, 2.0f, 0.5f);
+    float normalHeight = ((normalNoise + 1.0f) / 2.0f) * (b == BIOME_DESERT ? 18.0f : 24.0f);
+
+    // Compute extreme hills height (mountain component) using a ridge transformation.
+    float hillsNoise = fbmNoise(x * 0.002f, z * 0.002f, 6, 2.0f, 0.5f);
+    float ridge = 1.0f - fabs(hillsNoise);
+    float extremeHeight = (b == BIOME_DESERT)
+    ? 30.0f + pow(ridge, 2.0f) * 40.0f  // for desert, lower mountains
+    : 40.0f + pow(ridge, 2.0f) * 80.0f; // for others
+
+    // Compute blend factor from combined noise.
+    float combined = perlinNoise(x * 0.005f, z * 0.005f);
+    float blend = smoothstep(-0.1f, 0.1f, combined);
+
+    float finalHeight = mix(normalHeight, extremeHeight, blend);
+    return (int) finalHeight;
 }
 
 static bool blockHasCollision(BlockType t) {
@@ -283,8 +298,8 @@ static bool checkCollision(const Vec3 &pos) {
             for(int bz = startZ; bz <= endZ; bz++){
                 if(isSolidBlock(bx, by, bz)){
                     if(maxX > bx && minX < bx+1 &&
-                       maxY > by && minY < by+1 &&
-                       maxZ > bz && minZ < bz+1)
+                        maxY > by && minY < by+1 &&
+                        maxZ > bz && minZ < bz+1)
                         return true;
                 }
             }
@@ -307,19 +322,6 @@ bool canWaterFlowInto(int x, int y, int z) {
 }
 
 static void rebuildChunk(int cx, int cz);
-
-void adjustPlayerSpawn(Camera &camera) {
-    while(checkCollision(camera.position)) {
-        camera.position.y += 0.5f;
-        if(camera.position.y > 1000.0f) break;
-    }
-    int tx = (int)std::floor(camera.position.x);
-    int tz = (int)std::floor(camera.position.z);
-    int terrainHeight = getTerrainHeightAt(tx, tz);
-    if(camera.position.y <= terrainHeight) {
-        camera.position.y = terrainHeight + 1.0f;
-    }
-}
 
 static const int NEAR_CHUNK_RADIUS = 2;
 static void updateWaterFlow(const Camera &camera, float /*dt*/) {
@@ -422,10 +424,12 @@ static Chunk generateChunk(int cx, int cz) {
                     }
                     addCube(verts, (float)wx, (float)y, (float)wz, type, true);
                 }
+                // --- Adjusted tree generation ---
                 int chance = 0;
                 if(b == BIOME_FOREST) chance = 5;
-                else if(b == BIOME_PLAINS) chance = 50;
-                else if(b == BIOME_EXTREME_HILLS) chance = 80;
+                else if(b == BIOME_PLAINS) chance = 70;  // lower frequency (1 in 70)
+                else if(b == BIOME_DESERT) chance = 100;   // even fewer trees in desert
+                else if(b == BIOME_EXTREME_HILLS) chance = 0;
                 if(chance > 0 && (rand() % chance == 0)) {
                     int trunkH = 4 + (rand() % 3);
                     int baseY = height + 1;
@@ -471,7 +475,7 @@ static void rebuildChunk(int cx, int cz) {
     Chunk &chunk = chunks[{cx, cz}];
     std::vector<float> verts;
     verts.reserve(16 * 16 * 36 * 5);
-    
+
     for (int lx = 0; lx < 16; lx++){
         for (int lz = 0; lz < 16; lz++){
             int wx = cx * 16 + lx;
@@ -530,7 +534,7 @@ static void rebuildChunk(int cx, int cz) {
             }
         }
     }
-    
+
     for (auto &kv : waterLevels){
         int bx = std::get<0>(kv.first);
         int by = std::get<1>(kv.first);
@@ -540,7 +544,7 @@ static void rebuildChunk(int cx, int cz) {
         if(ccx == cx && ccz == cz)
             addCube(verts, (float)bx, (float)by, (float)bz, BLOCK_WATER, true);
     }
-    
+
     chunk.vertices = verts;
     glBindVertexArray(chunk.VAO);
     glBindBuffer(GL_ARRAY_BUFFER, chunk.VBO);
@@ -550,7 +554,6 @@ static void rebuildChunk(int cx, int cz) {
 
 // -----------------------------------------------------------------------------
 // Shaders and UI drawing functions.
-// Updated world shaders now include a specular term and use the texture alpha.
 static const char* worldVertSrc = R"(
 #version 330 core
 layout(location = 0) in vec3 aPos;
@@ -560,7 +563,6 @@ out vec3 FragPos;
 out vec2 TexCoord;
 void main(){
     gl_Position = MVP * vec4(aPos, 1.0);
-    // For terrain cubes, aPos is assumed to be in world space.
     FragPos = aPos;
     TexCoord = aTex;
 }
@@ -572,31 +574,27 @@ in vec3 FragPos;
 in vec2 TexCoord;
 out vec4 FragColor;
 uniform sampler2D ourTexture;
-uniform vec3 sunDirection;  // Directional light (normalized)
-uniform vec3 viewPos;       // Camera position in world space
+uniform vec3 sunDirection;
+uniform vec3 viewPos;
 void main(){
-    // Compute normal using screen-space derivatives.
     vec3 dx = dFdx(FragPos);
     vec3 dy = dFdy(FragPos);
     vec3 normal = normalize(cross(dx, dy));
-    
-    // Diffuse component.
+
     float diff = max(dot(normal, sunDirection), 0.0);
-    
-    // Specular component.
     vec3 viewDir = normalize(viewPos - FragPos);
     vec3 reflectDir = reflect(-sunDirection, normal);
     float spec = pow(max(dot(viewDir, reflectDir), 0.0), 16.0);
-    
+
     vec3 ambient = vec3(0.4);
     vec3 diffuse = vec3(0.6) * diff;
     vec3 specular = vec3(0.2) * spec;
     vec3 lighting = ambient + diffuse + specular;
-    
+
     vec4 texColor = texture(ourTexture, TexCoord);
     if(texColor.a < 0.1)
         discard;
-    
+
     FragColor = vec4(texColor.rgb * lighting, texColor.a);
 }
 )";
@@ -637,46 +635,46 @@ int drawPauseMenu(int screenW, int screenH) {
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glUseProgram(uiShader);
     float overlayVerts[12] = { 0, 0, (float)screenW, 0, (float)screenW, (float)screenH,
-                               0, 0, (float)screenW, (float)screenH, 0, (float)screenH };
-    glBindVertexArray(uiVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, uiVBO);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(overlayVerts), overlayVerts);
-    Mat4 proj = {};
-    proj.m[0]  = 2.0f/(float)screenW;
-    proj.m[5]  = 2.0f/(float)screenH;
-    proj.m[10] = -1.0f;
-    proj.m[15] = 1.0f;
-    proj.m[12] = -1.0f;
-    proj.m[13] = -1.0f;
-    glUniformMatrix4fv(glGetUniformLocation(uiShader, "uProj"), 1, GL_FALSE, proj.m);
-    glUniform4f(glGetUniformLocation(uiShader, "uColor"), 0.0f, 0.0f, 0.0f, 0.5f);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-    float resumeX = 300, resumeY = 250, resumeW = 200, resumeH = 50;
-    float resumeVerts[12] = { resumeX, resumeY, resumeX+resumeW, resumeY, resumeX+resumeW, resumeY+resumeH,
-                              resumeX, resumeY, resumeX+resumeW, resumeY+resumeH, resumeX, resumeY+resumeH };
-    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(resumeVerts), resumeVerts);
-    glUniform4f(glGetUniformLocation(uiShader, "uColor"), 0.2f, 0.6f, 1.0f, 1.0f);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-    float quitX = 300, quitY = 150, quitW = 200, quitH = 50;
-    float quitVerts[12] = { quitX, quitY, quitX+quitW, quitY, quitX+quitW, quitY+quitH,
-                            quitX, quitY, quitX+quitW, quitY+quitH, quitX, quitY+quitH };
-    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(quitVerts), quitVerts);
-    glUniform4f(glGetUniformLocation(uiShader, "uColor"), 1.0f, 0.3f, 0.3f, 1.0f);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-    int mx, my;
-    Uint32 mState = SDL_GetMouseState(&mx, &my);
-    bool leftDown = (mState & SDL_BUTTON(SDL_BUTTON_LEFT)) != 0;
-    int invY = screenH - my;
-    int result = 0;
-    if(leftDown) {
-        if(mx >= resumeX && mx <= resumeX+resumeW && invY >= resumeY && invY <= resumeY+resumeH)
-            result = 1;
-        else if(mx >= quitX && mx <= quitX+quitW && invY >= quitY && invY <= quitY+quitH)
-            result = 2;
-    }
-    glDisable(GL_BLEND);
-    glEnable(GL_DEPTH_TEST);
-    return result;
+        0, 0, (float)screenW, (float)screenH, 0, (float)screenH };
+        glBindVertexArray(uiVAO);
+        glBindBuffer(GL_ARRAY_BUFFER, uiVBO);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(overlayVerts), overlayVerts);
+        Mat4 proj = {};
+        proj.m[0]  = 2.0f/(float)screenW;
+        proj.m[5]  = 2.0f/(float)screenH;
+        proj.m[10] = -1.0f;
+        proj.m[15] = 1.0f;
+        proj.m[12] = -1.0f;
+        proj.m[13] = -1.0f;
+        glUniformMatrix4fv(glGetUniformLocation(uiShader, "uProj"), 1, GL_FALSE, proj.m);
+        glUniform4f(glGetUniformLocation(uiShader, "uColor"), 0.0f, 0.0f, 0.0f, 0.5f);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        float resumeX = 300, resumeY = 250, resumeW = 200, resumeH = 50;
+        float resumeVerts[12] = { resumeX, resumeY, resumeX+resumeW, resumeY, resumeX+resumeW, resumeY+resumeH,
+            resumeX, resumeY, resumeX+resumeW, resumeY+resumeH, resumeX, resumeY+resumeH };
+            glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(resumeVerts), resumeVerts);
+            glUniform4f(glGetUniformLocation(uiShader, "uColor"), 0.2f, 0.6f, 1.0f, 1.0f);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+            float quitX = 300, quitY = 150, quitW = 200, quitH = 50;
+            float quitVerts[12] = { quitX, quitY, quitX+quitW, quitY, quitX+quitW, quitY+quitH,
+                quitX, quitY, quitX+quitW, quitY+quitH, quitX, quitY+quitH };
+                glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(quitVerts), quitVerts);
+                glUniform4f(glGetUniformLocation(uiShader, "uColor"), 1.0f, 0.3f, 0.3f, 1.0f);
+                glDrawArrays(GL_TRIANGLES, 0, 6);
+                int mx, my;
+                Uint32 mState = SDL_GetMouseState(&mx, &my);
+                bool leftDown = (mState & SDL_BUTTON(SDL_BUTTON_LEFT)) != 0;
+                int invY = screenH - my;
+                int result = 0;
+                if(leftDown) {
+                    if(mx >= resumeX && mx <= resumeX+resumeW && invY >= resumeY && invY <= resumeY+resumeH)
+                        result = 1;
+                    else if(mx >= quitX && mx <= quitX+quitW && invY >= quitY && invY <= quitY+quitH)
+                        result = 2;
+                }
+                glDisable(GL_BLEND);
+                glEnable(GL_DEPTH_TEST);
+                return result;
 }
 
 void drawFlyIndicator(bool isFlying, int screenW, int screenH) {
@@ -713,7 +711,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
     bool loadedOk = loadWorld("saved_world.txt", loadedSeed, loadedX, loadedY, loadedZ);
     if(loadedOk)
         std::cout << "[World] Loaded seed=" << loadedSeed
-                  << " player(" << loadedX << "," << loadedY << "," << loadedZ << ")\n";
+        << " player(" << loadedX << "," << loadedY << "," << loadedZ << ")\n";
     else {
         unsigned int rseed = (unsigned int)time(nullptr);
         std::cout << "[World] No saved world, random seed=" << rseed << "\n";
@@ -839,13 +837,13 @@ int main(int /*argc*/, char* /*argv*/[]) {
                     SDL_SetRelativeMouseMode(inventory.isOpen() ? SDL_FALSE : SDL_TRUE);
                 }
                 else if(!paused && !inventory.isOpen() && !isFlying &&
-                        ev.key.keysym.sym == SDLK_SPACE) {
+                    ev.key.keysym.sym == SDLK_SPACE) {
                     int footX = (int)std::floor(camera.position.x);
-                    int footY = (int)std::floor(camera.position.y - 0.1f);
-                    int footZ = (int)std::floor(camera.position.z);
-                    if(isSolidBlock(footX, footY, footZ))
-                        verticalVelocity = JUMP_SPEED;
-                }
+                int footY = (int)std::floor(camera.position.y - 0.1f);
+                int footZ = (int)std::floor(camera.position.z);
+                if(isSolidBlock(footX, footY, footZ))
+                    verticalVelocity = JUMP_SPEED;
+                    }
             }
             else if(ev.type == SDL_MOUSEMOTION) {
                 if(!paused && !inventory.isOpen()) {
@@ -859,49 +857,49 @@ int main(int /*argc*/, char* /*argv*/[]) {
             else if(!paused && !inventory.isOpen() && ev.type == SDL_MOUSEBUTTONDOWN) {
                 Vec3 eyePos = camera.position; eyePos.y += 1.6f;
                 Vec3 viewDir = { cos(camera.yaw)*cos(camera.pitch),
-                                 sin(camera.pitch),
-                                 sin(camera.yaw)*cos(camera.pitch) };
-                viewDir = normalize(viewDir);
-                int bx, by, bz;
-                bool hit = raycastBlock(eyePos, viewDir, 5.0f, bx, by, bz);
-                if(hit) {
-                    if(ev.button.button == SDL_BUTTON_LEFT) {
-                        auto it = extraBlocks.find({bx,by,bz});
-                        if(it != extraBlocks.end())
-                            extraBlocks.erase(it);
-                        else
-                            extraBlocks[{bx,by,bz}] = (BlockType)(-1);
-                        int cx, cz; getChunkCoords(bx, bz, cx, cz);
-                        rebuildChunk(cx, cz);
-                    }
-                    else if(ev.button.button == SDL_BUTTON_RIGHT) {
-                        float stepBack = 0.05f, traveled = 0.0f;
-                        while(traveled < 5.0f) {
-                            Vec3 pos = add(eyePos, multiply(viewDir, traveled));
-                            int cbx = (int)std::floor(pos.x);
-                            int cby = (int)std::floor(pos.y);
-                            int cbz = (int)std::floor(pos.z);
-                            if(cbx == bx && cby == by && cbz == bz) {
-                                float tb = traveled - stepBack;
-                                if(tb < 0) break;
-                                Vec3 placePos = add(eyePos, multiply(viewDir, tb));
-                                int pbx = (int)std::floor(placePos.x);
-                                int pby = (int)std::floor(placePos.y);
-                                int pbz = (int)std::floor(placePos.z);
-                                if(!isSolidBlock(pbx, pby, pbz)) {
-                                    int blockToPlace = inventory.getSelectedBlock();
-                                    extraBlocks[{pbx, pby, pbz}] = (BlockType)blockToPlace;
-                                    if(blockToPlace == BLOCK_WATER)
-                                        waterLevels[{pbx, pby, pbz}] = 8;
-                                    int cpx, cpz; getChunkCoords(pbx, pbz, cpx, cpz);
-                                    rebuildChunk(cpx, cpz);
+                    sin(camera.pitch),
+                    sin(camera.yaw)*cos(camera.pitch) };
+                    viewDir = normalize(viewDir);
+                    int bx, by, bz;
+                    bool hit = raycastBlock(eyePos, viewDir, 5.0f, bx, by, bz);
+                    if(hit) {
+                        if(ev.button.button == SDL_BUTTON_LEFT) {
+                            auto it = extraBlocks.find({bx,by,bz});
+                            if(it != extraBlocks.end())
+                                extraBlocks.erase(it);
+                            else
+                                extraBlocks[{bx,by,bz}] = (BlockType)(-1);
+                            int cx, cz; getChunkCoords(bx, bz, cx, cz);
+                            rebuildChunk(cx, cz);
+                        }
+                        else if(ev.button.button == SDL_BUTTON_RIGHT) {
+                            float stepBack = 0.05f, traveled = 0.0f;
+                            while(traveled < 5.0f) {
+                                Vec3 pos = add(eyePos, multiply(viewDir, traveled));
+                                int cbx = (int)std::floor(pos.x);
+                                int cby = (int)std::floor(pos.y);
+                                int cbz = (int)std::floor(pos.z);
+                                if(cbx == bx && cby == by && cbz == bz) {
+                                    float tb = traveled - stepBack;
+                                    if(tb < 0) break;
+                                    Vec3 placePos = add(eyePos, multiply(viewDir, tb));
+                                    int pbx = (int)std::floor(placePos.x);
+                                    int pby = (int)std::floor(placePos.y);
+                                    int pbz = (int)std::floor(placePos.z);
+                                    if(!isSolidBlock(pbx, pby, pbz)) {
+                                        int blockToPlace = inventory.getSelectedBlock();
+                                        extraBlocks[{pbx, pby, pbz}] = (BlockType)blockToPlace;
+                                        if(blockToPlace == BLOCK_WATER)
+                                            waterLevels[{pbx, pby, pbz}] = 8;
+                                        int cpx, cpz; getChunkCoords(pbx, pbz, cpx, cpz);
+                                        rebuildChunk(cpx, cpz);
+                                    }
+                                    break;
                                 }
-                                break;
+                                traveled += 0.1f;
                             }
-                            traveled += 0.1f;
                         }
                     }
-                }
             }
         }
         if(paused) {
@@ -914,39 +912,39 @@ int main(int /*argc*/, char* /*argv*/[]) {
             glUniform1i(tLoc, 0);
             Vec3 eyePos = camera.position; eyePos.y += 1.6f;
             Vec3 viewDir = { cos(camera.yaw)*cos(camera.pitch),
-                             sin(camera.pitch),
-                             sin(camera.yaw)*cos(camera.pitch) };
-            Vec3 camTgt = add(eyePos, viewDir);
-            Mat4 view = lookAtMatrix(eyePos, camTgt, {0,1,0});
-            Mat4 proj = perspectiveMatrix(45.0f*(3.14159f/180.0f),
-                                          (float)SCREEN_WIDTH/(float)SCREEN_HEIGHT,
-                                          0.1f, 100.0f);
-            Mat4 pv = multiplyMatrix(proj, view);
-            int pcx = (int)std::floor(camera.position.x/(float)chunkSize);
-            int pcz = (int)std::floor(camera.position.z/(float)chunkSize);
-            for(auto &pair : chunks) {
-                int cX = pair.first.first, cZ = pair.first.second;
-                if(std::abs(cX-pcx) > renderDistance || std::abs(cZ-pcz) > renderDistance)
-                    continue;
-                Chunk &ch = pair.second;
-                Mat4 mvp = multiplyMatrix(pv, identityMatrix());
-                GLint mvpLoc = glGetUniformLocation(worldShader, "MVP");
-                glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, mvp.m);
-                glBindVertexArray(ch.VAO);
-                glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(ch.vertices.size()/5));
-            }
-            int clicked = drawPauseMenu(SCREEN_WIDTH, SCREEN_HEIGHT);
-            if(clicked == 1) {
-                paused = false;
-                SDL_SetRelativeMouseMode(SDL_TRUE);
-            }
-            else if(clicked == 2) {
-                saveWorld("saved_world.txt", loadedSeed,
-                          camera.position.x, camera.position.y, camera.position.z);
-                running = false;
-            }
-            SDL_GL_SwapWindow(window);
-            continue;
+                sin(camera.pitch),
+                sin(camera.yaw)*cos(camera.pitch) };
+                Vec3 camTgt = add(eyePos, viewDir);
+                Mat4 view = lookAtMatrix(eyePos, camTgt, {0,1,0});
+                Mat4 proj = perspectiveMatrix(45.0f*(3.14159f/180.0f),
+                                              (float)SCREEN_WIDTH/(float)SCREEN_HEIGHT,
+                                              0.1f, 100.0f);
+                Mat4 pv = multiplyMatrix(proj, view);
+                int pcx = (int)std::floor(camera.position.x/(float)chunkSize);
+                int pcz = (int)std::floor(camera.position.z/(float)chunkSize);
+                for(auto &pair : chunks) {
+                    int cX = pair.first.first, cZ = pair.first.second;
+                    if(std::abs(cX-pcx) > renderDistance || std::abs(cZ-pcz) > renderDistance)
+                        continue;
+                    Chunk &ch = pair.second;
+                    Mat4 mvp = multiplyMatrix(pv, identityMatrix());
+                    GLint mvpLoc = glGetUniformLocation(worldShader, "MVP");
+                    glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, mvp.m);
+                    glBindVertexArray(ch.VAO);
+                    glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(ch.vertices.size()/5));
+                }
+                int clicked = drawPauseMenu(SCREEN_WIDTH, SCREEN_HEIGHT);
+                if(clicked == 1) {
+                    paused = false;
+                    SDL_SetRelativeMouseMode(SDL_TRUE);
+                }
+                else if(clicked == 2) {
+                    saveWorld("saved_world.txt", loadedSeed,
+                              camera.position.x, camera.position.y, camera.position.z);
+                    running = false;
+                }
+                SDL_GL_SwapWindow(window);
+                continue;
         }
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -1016,47 +1014,44 @@ int main(int /*argc*/, char* /*argv*/[]) {
         glBindTexture(GL_TEXTURE_2D, texID);
         GLint uniTex = glGetUniformLocation(worldShader, "ourTexture");
         glUniform1i(uniTex, 0);
-        // Set directional light and view position for realistic lighting.
         Vec3 sunDir = normalize({0.3f, 1.0f, 0.3f});
         glUniform3f(glGetUniformLocation(worldShader, "sunDirection"), sunDir.x, sunDir.y, sunDir.z);
         glUniform3f(glGetUniformLocation(worldShader, "viewPos"), camera.position.x, camera.position.y, camera.position.z);
-        
+
         Vec3 eyePos = camera.position; eyePos.y += 1.6f;
         Vec3 viewDir = { cos(camera.yaw)*cos(camera.pitch),
-                         sin(camera.pitch),
-                         sin(camera.yaw)*cos(camera.pitch) };
-        Vec3 camTgt = add(eyePos, viewDir);
-        Mat4 view = lookAtMatrix(eyePos, camTgt, {0,1,0});
-        Mat4 projWorld = perspectiveMatrix(45.0f*(3.14159f/180.0f),
-                                           (float)SCREEN_WIDTH/(float)SCREEN_HEIGHT,
-                                           0.1f, 100.0f);
-        Mat4 pv = multiplyMatrix(projWorld, view);
-        for(auto &pair: chunks){
-            int cX = pair.first.first, cZ = pair.first.second;
-            if(std::abs(cX-pcx) > renderDistance || std::abs(cZ-pcz) > renderDistance)
-                continue;
-            Chunk &ch = pair.second;
-            Mat4 mvp = multiplyMatrix(pv, identityMatrix());
-            GLint mvpLoc = glGetUniformLocation(worldShader, "MVP");
-            glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, mvp.m);
-            glBindVertexArray(ch.VAO);
-            glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(ch.vertices.size()/5));
-        }
-        glUseProgram(uiShader);
-        drawFlyIndicator(isFlying, SCREEN_WIDTH, SCREEN_HEIGHT);
-        inventory.render();
-        // Render held item: if a block is selected, render it as a 3D cube;
-        // otherwise, render the hand as a rectangle.
-        if(inventory.getSelectedBlock() != BLOCK_NONE) {
-            glDisable(GL_DEPTH_TEST);
-            renderHeldBlock3D(projWorld, inventory.getSelectedBlock());
-            glEnable(GL_DEPTH_TEST);
-        } else {
-            glDisable(GL_DEPTH_TEST);
-            renderHandRect(projWorld);
-            glEnable(GL_DEPTH_TEST);
-        }
-        SDL_GL_SwapWindow(window);
+            sin(camera.pitch),
+            sin(camera.yaw)*cos(camera.pitch) };
+            Vec3 camTgt = add(eyePos, viewDir);
+            Mat4 view = lookAtMatrix(eyePos, camTgt, {0,1,0});
+            Mat4 projWorld = perspectiveMatrix(45.0f*(3.14159f/180.0f),
+                                               (float)SCREEN_WIDTH/(float)SCREEN_HEIGHT,
+                                               0.1f, 100.0f);
+            Mat4 pv = multiplyMatrix(projWorld, view);
+            for(auto &pair: chunks){
+                int cX = pair.first.first, cZ = pair.first.second;
+                if(std::abs(cX-pcx) > renderDistance || std::abs(cZ-pcz) > renderDistance)
+                    continue;
+                Chunk &ch = pair.second;
+                Mat4 mvp = multiplyMatrix(pv, identityMatrix());
+                GLint mvpLoc = glGetUniformLocation(worldShader, "MVP");
+                glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, mvp.m);
+                glBindVertexArray(ch.VAO);
+                glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(ch.vertices.size()/5));
+            }
+            glUseProgram(uiShader);
+            drawFlyIndicator(isFlying, SCREEN_WIDTH, SCREEN_HEIGHT);
+            inventory.render();
+            if(inventory.getSelectedBlock() != BLOCK_NONE) {
+                glDisable(GL_DEPTH_TEST);
+                renderHeldBlock3D(projWorld, inventory.getSelectedBlock());
+                glEnable(GL_DEPTH_TEST);
+            } else {
+                glDisable(GL_DEPTH_TEST);
+                renderHandRect(projWorld);
+                glEnable(GL_DEPTH_TEST);
+            }
+            SDL_GL_SwapWindow(window);
     }
     saveWorld("saved_world.txt", loadedSeed,
               camera.position.x, camera.position.y, camera.position.z);
@@ -1069,4 +1064,3 @@ int main(int /*argc*/, char* /*argv*/[]) {
     SDL_Quit();
     return 0;
 }
-
