@@ -7,6 +7,10 @@
 #include <tuple>
 #include <cstdlib>
 #include <ctime>
+#include <future>      // For asynchronous chunk generation
+#include <chrono>      // For timing asynchronous operations
+#include <mutex>       // For protecting shared maps
+#include <algorithm>   // For std::sort
 
 #include "math.h"       // Provides identityMatrix(), multiplyMatrix(), vector math, etc.
 #include "shader.h"     // Shader compilation and program creation
@@ -25,10 +29,16 @@ GLuint handTex = 0;
 #define BLOCK_NONE -1
 #endif
 
+// Global mutex to protect shared maps (waterLevels and extraBlocks)
+std::mutex gMapMutex;
+
 // Forward declarations for UI functions.
 int drawPauseMenu(int screenW, int screenH);
 void drawFlyIndicator(bool isFlying, int screenW, int screenH);
 void drawFirstPersonHand3D(int screenW, int screenH, const Mat4 &proj); // (unused in new approach)
+
+// Forward declaration for updateWaterFlow to ensure it's visible in main
+static void updateWaterFlow(const Camera &camera, float dt);
 
 // --- Helper functions for constructing model matrices ---
 Mat4 translateMatrix(float tx, float ty, float tz) {
@@ -47,6 +57,18 @@ Mat4 scaleMatrix(float sx, float sy, float sz) {
     return mat;
 }
 
+// --- Additional helper functions ---
+static float smoothstep(float edge0, float edge1, float x) {
+    float t = (x - edge0) / (edge1 - edge0);
+    if(t < 0) t = 0;
+    if(t > 1) t = 1;
+    return t * t * (3 - 2 * t);
+}
+
+static float mix(float a, float b, float t) {
+    return a + t * (b - a);
+}
+
 // --- Global constant for tick timing ---
 static const float TICK_INTERVAL = 0.5f; // seconds per tick
 
@@ -62,10 +84,13 @@ static bool raycastBlock(const Vec3 &start, const Vec3 &dir, float maxDist, int 
         int by = (int)std::floor(pos.y);
         int bz = (int)std::floor(pos.z);
         std::tuple<int,int,int> key = {bx, by, bz};
-        if(isSolidBlock(bx, by, bz) ||
-           (extraBlocks.find(key) != extraBlocks.end() && extraBlocks[key] == BLOCK_LEAVES)) {
-            outX = bx; outY = by; outZ = bz;
-            return true;
+        {
+            std::lock_guard<std::mutex> lock(gMapMutex);
+            if(isSolidBlock(bx, by, bz) ||
+               (extraBlocks.find(key) != extraBlocks.end() && extraBlocks[key] == BLOCK_LEAVES)) {
+                outX = bx; outY = by; outZ = bz;
+                return true;
+            }
         }
         traveled += step;
     }
@@ -85,7 +110,7 @@ void renderHeldBlock3D(const Mat4 &proj, int activeBlock) {
     model = multiplyMatrix(model, rotY);
     model = multiplyMatrix(model, scaleMatrix(0.5f, 0.5f, 0.5f));
     Mat4 mvp = multiplyMatrix(proj, model);
-    
+
     glUseProgram(worldShader);
     GLint mvpLoc = glGetUniformLocation(worldShader, "MVP");
     glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, mvp.m);
@@ -93,11 +118,11 @@ void renderHeldBlock3D(const Mat4 &proj, int activeBlock) {
     glBindTexture(GL_TEXTURE_2D, texID);
     GLint texLoc = glGetUniformLocation(worldShader, "ourTexture");
     glUniform1i(texLoc, 0);
-    
+
     std::vector<float> verts;
     verts.reserve(36 * 5);
     addCube(verts, 0.0f, 0.0f, 0.0f, (BlockType)activeBlock, false);
-    
+
     GLuint heldVAO, heldVBO;
     glGenVertexArrays(1, &heldVAO);
     glGenBuffers(1, &heldVBO);
@@ -108,32 +133,28 @@ void renderHeldBlock3D(const Mat4 &proj, int activeBlock) {
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
     glEnableVertexAttribArray(1);
-    
+
     glDrawArrays(GL_TRIANGLES, 0, 36);
-    
+
     glBindVertexArray(0);
     glDeleteBuffers(1, &heldVBO);
     glDeleteVertexArrays(1, &heldVAO);
 }
 
 // --- Render the hand as a flat 3D rectangle ---
-// The translation in Z is set to -0.8f so the hand appears closer, as if the player is reaching forward.
 void renderHandRect(const Mat4 &proj) {
     float handVerts[] = {
         // positions       // UVs
-         0.0f,  0.0f, 0.0f,   0.0f, 0.0f,
-         1.0f,  0.0f, 0.0f,   1.0f, 0.0f,
-         1.0f,  1.0f, 0.0f,   1.0f, 1.0f,
-         
-         0.0f,  0.0f, 0.0f,   0.0f, 0.0f,
-         1.0f,  1.0f, 0.0f,   1.0f, 1.0f,
-         0.0f,  1.0f, 0.0f,   0.0f, 1.0f
+        0.0f,  0.0f, 0.0f,   0.0f, 0.0f,
+        1.0f,  0.0f, 0.0f,   1.0f, 0.0f,
+        1.0f,  1.0f, 0.0f,   1.0f, 1.0f,
+        0.0f,  0.0f, 0.0f,   0.0f, 0.0f,
+        1.0f,  1.0f, 0.0f,   1.0f, 1.0f,
+        0.0f,  1.0f, 0.0f,   0.0f, 1.0f
     };
-    
+
     Mat4 model = identityMatrix();
-    // Translate so that the hand appears more forward.
     model = multiplyMatrix(model, translateMatrix(0.8f, -0.8f, -0.8f));
-    // Optionally, rotate the rectangle slightly.
     Mat4 rotZ = identityMatrix();
     float angle = 0.2f; // radians
     rotZ.m[0] = cos(angle);
@@ -141,20 +162,19 @@ void renderHandRect(const Mat4 &proj) {
     rotZ.m[4] = sin(angle);
     rotZ.m[5] = cos(angle);
     model = multiplyMatrix(model, rotZ);
-    // Scale the rectangle to a desired size.
     model = multiplyMatrix(model, scaleMatrix(0.7f, 0.4f, 1.0f));
-    
+
     Mat4 mvp = multiplyMatrix(proj, model);
-    
+
     glUseProgram(worldShader);
     GLint mvpLoc = glGetUniformLocation(worldShader, "MVP");
     glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, mvp.m);
-    
+
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, handTex);
     GLint texLoc = glGetUniformLocation(worldShader, "ourTexture");
     glUniform1i(texLoc, 0);
-    
+
     GLuint handVAO, handVBO;
     glGenVertexArrays(1, &handVAO);
     glGenBuffers(1, &handVBO);
@@ -165,9 +185,9 @@ void renderHandRect(const Mat4 &proj) {
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
     glEnableVertexAttribArray(1);
-    
+
     glDrawArrays(GL_TRIANGLES, 0, 6);
-    
+
     glBindVertexArray(0);
     glDeleteBuffers(1, &handVBO);
     glDeleteVertexArrays(1, &handVAO);
@@ -175,11 +195,11 @@ void renderHandRect(const Mat4 &proj) {
 
 // -----------------------------------------------------------------------------
 // Global settings and declarations.
-int SCREEN_WIDTH  = 1280;
-int SCREEN_HEIGHT = 720;
+int SCREEN_WIDTH  = 960;
+int SCREEN_HEIGHT = 480;
 
 static const int chunkSize      = 16;
-static const int renderDistance = 6;
+static const int renderDistance = 10;
 
 static const float playerWidth  = 0.6f;
 static const float playerHeight = 1.8f;
@@ -188,16 +208,13 @@ static const float WORLD_FLOOR_LIMIT = -10.0f;
 static const float GRAVITY    = -9.81f;
 static const float JUMP_SPEED =  5.0f;
 
-// 3D pipeline globals.
 GLuint worldShader = 0;
 GLuint texID       = 0;
 
-// 2D UI pipeline globals.
 GLuint uiShader    = 0;
 GLuint uiVAO       = 0;
 GLuint uiVBO       = 0;
 
-// A chunk holds geometry for a 16x16 area.
 struct Chunk {
     int chunkX, chunkZ;
     std::vector<float> vertices;
@@ -206,7 +223,6 @@ struct Chunk {
 
 std::unordered_map<std::pair<int,int>, Chunk, PairHash> chunks;
 
-// Biome definitions.
 enum Biome {
     BIOME_PLAINS,
     BIOME_DESERT,
@@ -215,49 +231,62 @@ enum Biome {
     BIOME_OCEAN
 };
 
+// --- Revised getBiome function ---
+// Desert regions now spawn less frequently (threshold lowered),
+// while extreme hills, plains and forest are determined from combined noise.
 static Biome getBiome(int x, int z) {
     float oceanNoise = perlinNoise(x * 0.001f, z * 0.001f);
     if(oceanNoise < -0.8f)
         return BIOME_OCEAN;
-    float freq1 = 0.0035f, freq2 = 0.0037f;
-    float n1 = perlinNoise(x * freq1, z * freq1);
-    float n2 = perlinNoise((x+1000)*freq2, (z+1000)*freq2);
-    float combined = 0.5f * (n1 + n2);
-    if(combined < -0.4f)
+
+    // Lower desert frequency by using a stricter threshold.
+    float desertNoise = perlinNoise(x * 0.0007f, z * 0.0007f);
+    if(desertNoise < -0.2f)
         return BIOME_DESERT;
-    else if(combined < -0.1f)
+
+    float combined = perlinNoise(x * 0.005f, z * 0.005f);
+    if(combined < -0.1f)
         return BIOME_PLAINS;
-    else if(combined < 0.2f)
+    else if(combined < 0.0f)
         return BIOME_FOREST;
     else
         return BIOME_EXTREME_HILLS;
 }
 
+// --- New blended terrain height function ---
+// For non-ocean biomes, we blend a base height (normal terrain) with an extreme hills (mountain) height.
+// For deserts, both the normal and extreme components are lowered.
 int getTerrainHeightAt(int x, int z) {
     Biome b = getBiome(x, z);
     if(b == BIOME_OCEAN)
         return 8;
-    if(b == BIOME_EXTREME_HILLS) {
-        float freq = 0.0007f;
-        int octaves = 8;
-        float lacunarity = 2.3f, gain = 0.5f;
-        float n = fbmNoise(x * freq, z * freq, octaves, lacunarity, gain);
-        float normalized = 0.5f * (n + 1.0f);
-        if(normalized < 0.0f) normalized = 0.0f;
-        if(normalized > 1.0f) normalized = 1.0f;
-        return (int)(powf(normalized, 2.0f) * 40.0f);
-    } else {
-        float n = fbmNoise(x * 0.01f, z * 0.01f, 6, 2.0f, 0.5f);
-        float normalized = 0.5f * (n + 1.0f);
-        return (int)(normalized * 24.0f);
-    }
+
+    // Compute normal height.
+    float normalNoise = fbmNoise(x * 0.01f, z * 0.01f, 6, 2.0f, 0.5f);
+    float normalHeight = ((normalNoise + 1.0f) / 2.0f) * (b == BIOME_DESERT ? 18.0f : 24.0f);
+
+    // Compute extreme hills height (mountain component) using a ridge transformation.
+    float hillsNoise = fbmNoise(x * 0.002f, z * 0.002f, 6, 2.0f, 0.5f);
+    float ridge = 1.0f - fabs(hillsNoise);
+    float extremeHeight = (b == BIOME_DESERT)
+        ? 30.0f + pow(ridge, 2.0f) * 40.0f  // for desert, lower mountains
+        : 40.0f + pow(ridge, 2.0f) * 80.0f;  // for others
+
+    // Compute blend factor from combined noise.
+    float combined = perlinNoise(x * 0.005f, z * 0.005f);
+    float blend = smoothstep(-0.1f, 0.1f, combined);
+
+    float finalHeight = mix(normalHeight, extremeHeight, blend);
+    return (int) finalHeight;
 }
 
 static bool blockHasCollision(BlockType t) {
     return (t != BLOCK_WATER);
 }
 
+// Protect isSolidBlock with a lock to avoid concurrent read/write.
 bool isSolidBlock(int bx, int by, int bz) {
+    std::lock_guard<std::mutex> lock(gMapMutex);
     auto key = std::make_tuple(bx, by, bz);
     if(extraBlocks.find(key) != extraBlocks.end()){
         BlockType t = extraBlocks[key];
@@ -294,6 +323,7 @@ static bool checkCollision(const Vec3 &pos) {
 }
 
 bool canWaterFlowInto(int x, int y, int z) {
+    std::lock_guard<std::mutex> lock(gMapMutex);
     std::tuple<int,int,int> key = {x, y, z};
     if(extraBlocks.find(key) != extraBlocks.end())
         return false;
@@ -306,77 +336,16 @@ bool canWaterFlowInto(int x, int y, int z) {
     return true;
 }
 
+// Before entering main, if no saved world is loaded, adjust spawn so player isn’t in Extreme Hills.
+// (We perform this check inside main below.)
+
 static void rebuildChunk(int cx, int cz);
 
-void adjustPlayerSpawn(Camera &camera) {
-    while(checkCollision(camera.position)) {
-        camera.position.y += 0.5f;
-        if(camera.position.y > 1000.0f) break;
-    }
-    int tx = (int)std::floor(camera.position.x);
-    int tz = (int)std::floor(camera.position.z);
-    int terrainHeight = getTerrainHeightAt(tx, tz);
-    if(camera.position.y <= terrainHeight) {
-        camera.position.y = terrainHeight + 1.0f;
-    }
-}
+// -------------------------
+// CHUNK OPTIMIZATION START
+// The following new functions enable asynchronous generation of chunk vertex data.
 
-static const int NEAR_CHUNK_RADIUS = 2;
-static void updateWaterFlow(const Camera &camera, float /*dt*/) {
-    int playerChunkX = (int)std::floor(camera.position.x / (float)chunkSize);
-    int playerChunkZ = (int)std::floor(camera.position.z / (float)chunkSize);
-    std::vector<std::tuple<int,int,int>> waterKeys;
-    for(auto &entry : waterLevels)
-        waterKeys.push_back(entry.first);
-    for(auto key : waterKeys) {
-        int x, y, z;
-        std::tie(x, y, z) = key;
-        int cellChunkX = x / 16; if(x < 0 && x % 16 != 0) cellChunkX--;
-        int cellChunkZ = z / 16; if(z < 0 && z % 16 != 0) cellChunkZ--;
-        if (std::abs(cellChunkX - playerChunkX) > NEAR_CHUNK_RADIUS ||
-            std::abs(cellChunkZ - playerChunkZ) > NEAR_CHUNK_RADIUS)
-            continue;
-        int level = waterLevels[key];
-        if(y > 0 && canWaterFlowInto(x, y - 1, z)) {
-            std::tuple<int,int,int> below = {x, y - 1, z};
-            int belowLevel = 0;
-            if(waterLevels.find(below) != waterLevels.end())
-                belowLevel = waterLevels[below];
-            if(8 > belowLevel) {
-                waterLevels[below] = 8;
-                int cx = x / 16; if(x < 0 && x % 16 != 0) cx--;
-                int cz = z / 16; if(z < 0 && z % 16 != 0) cz--;
-                rebuildChunk(cx, cz);
-            }
-        }
-        if(level > 1) {
-            int offsets[4][3] = { {1,0,0}, {-1,0,0}, {0,0,1}, {0,0,-1} };
-            for(int i = 0; i < 4; i++) {
-                int nx = x + offsets[i][0];
-                int ny = y;
-                int nz = z + offsets[i][2];
-                if(!canWaterFlowInto(nx, ny, nz))
-                    continue;
-                std::tuple<int,int,int> neighbor = {nx, ny, nz};
-                int neighborLevel = 0;
-                if(waterLevels.find(neighbor) != waterLevels.end())
-                    neighborLevel = waterLevels[neighbor];
-                int newLevel = level - 1;
-                if(newLevel > neighborLevel && newLevel > 1) {
-                    waterLevels[neighbor] = newLevel;
-                    int cx = nx / 16; if(nx < 0 && nx % 16 != 0) cx--;
-                    int cz = nz / 16; if(nz < 0 && nz % 16 != 0) cz--;
-                    rebuildChunk(cx, cz);
-                }
-            }
-        }
-    }
-}
-
-static Chunk generateChunk(int cx, int cz) {
-    Chunk chunk;
-    chunk.chunkX = cx;
-    chunk.chunkZ = cz;
+std::vector<float> generateChunkVertices(int cx, int cz) {
     std::vector<float> verts;
     verts.reserve(16 * 16 * 36 * 5);
     unsigned int chunkSeed = (unsigned int)(cx * 73856093u ^ cz * 19349663u);
@@ -396,7 +365,10 @@ static Chunk generateChunk(int cx, int cz) {
                 const int oceanWaterLayers = 6;
                 for(int y = 0; y < oceanWaterLayers; y++){
                     addCube(verts, (float)wx, (float)y, (float)wz, BLOCK_WATER, false);
-                    waterLevels[{wx, y, wz}] = 8;
+                    {
+                        std::lock_guard<std::mutex> lock(gMapMutex);
+                        waterLevels[{wx, y, wz}] = 8;
+                    }
                 }
                 addCube(verts, (float)wx, (float)oceanWaterLayers, (float)wz, BLOCK_SAND, false);
                 addCube(verts, (float)wx, (float)(oceanWaterLayers + 1), (float)wz, BLOCK_BEDROCK, false);
@@ -422,16 +394,21 @@ static Chunk generateChunk(int cx, int cz) {
                     }
                     addCube(verts, (float)wx, (float)y, (float)wz, type, true);
                 }
+                // Tree generation
                 int chance = 0;
                 if(b == BIOME_FOREST) chance = 5;
-                else if(b == BIOME_PLAINS) chance = 50;
-                else if(b == BIOME_EXTREME_HILLS) chance = 80;
+                else if(b == BIOME_PLAINS) chance = 70;
+                else if(b == BIOME_DESERT) chance = 100;
+                else if(b == BIOME_EXTREME_HILLS) chance = 0;
                 if(chance > 0 && (rand() % chance == 0)) {
                     int trunkH = 4 + (rand() % 3);
-                    int baseY = height + 1;
+                    int baseY = getTerrainHeightAt(wx, wz) + 1;
                     for(int ty = baseY; ty < baseY + trunkH; ty++){
                         addCube(verts, (float)wx, (float)ty, (float)wz, BLOCK_TREE_LOG, true);
-                        extraBlocks[{wx, ty, wz}] = BLOCK_TREE_LOG;
+                        {
+                            std::lock_guard<std::mutex> lock(gMapMutex);
+                            extraBlocks[{wx, ty, wz}] = BLOCK_TREE_LOG;
+                        }
                     }
                     int topY = baseY + trunkH - 1;
                     for(int lx2 = wx - 1; lx2 <= wx + 1; lx2++){
@@ -439,15 +416,28 @@ static Chunk generateChunk(int cx, int cz) {
                             if(lx2 == wx && lz2 == wz)
                                 continue;
                             addCube(verts, (float)lx2, (float)topY, (float)lz2, BLOCK_LEAVES, false);
-                            extraBlocks[{lx2, topY, lz2}] = BLOCK_LEAVES;
+                            {
+                                std::lock_guard<std::mutex> lock(gMapMutex);
+                                extraBlocks[{lx2, topY, lz2}] = BLOCK_LEAVES;
+                            }
                         }
                     }
                     addCube(verts, (float)wx, (float)(topY + 1), (float)wz, BLOCK_LEAVES, false);
-                    extraBlocks[{wx, topY + 1, wz}] = BLOCK_LEAVES;
+                    {
+                        std::lock_guard<std::mutex> lock(gMapMutex);
+                        extraBlocks[{wx, topY + 1, wz}] = BLOCK_LEAVES;
+                    }
                 }
             }
         }
     }
+    return verts;
+}
+
+Chunk createChunkFromVertices(int cx, int cz, const std::vector<float>& verts) {
+    Chunk chunk;
+    chunk.chunkX = cx;
+    chunk.chunkZ = cz;
     chunk.vertices = verts;
     glGenVertexArrays(1, &chunk.VAO);
     glGenBuffers(1, &chunk.VBO);
@@ -456,11 +446,43 @@ static Chunk generateChunk(int cx, int cz) {
     glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3*sizeof(float)));
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
     glEnableVertexAttribArray(1);
     glBindVertexArray(0);
     return chunk;
 }
+
+// Global map to store pending asynchronous chunk generation futures.
+std::unordered_map<std::pair<int,int>, std::future<std::vector<float>>, PairHash> chunkFutures;
+
+void startChunkGeneration(int cx, int cz) {
+    std::pair<int,int> key = {cx, cz};
+    if(chunkFutures.find(key) == chunkFutures.end()) {
+        chunkFutures[key] = std::async(std::launch::async, [cx, cz]() {
+            return generateChunkVertices(cx, cz);
+        });
+    }
+}
+
+void processPendingChunks() {
+    for(auto it = chunkFutures.begin(); it != chunkFutures.end(); ) {
+        std::future_status status = it->second.wait_for(std::chrono::milliseconds(0));
+        if(status == std::future_status::ready) {
+            std::vector<float> verts = it->second.get();
+            std::pair<int,int> key = it->first;
+            Chunk chunk = createChunkFromVertices(key.first, key.second, verts);
+            {
+                std::lock_guard<std::mutex> lock(gMapMutex);
+                chunks[key] = chunk;
+            }
+            it = chunkFutures.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+// CHUNK OPTIMIZATION END
+// -------------------------
 
 static void getChunkCoords(int bx, int bz, int &cx, int &cz) {
     cx = bx / 16; if(bx < 0 && bx % 16 != 0) cx--;
@@ -471,7 +493,7 @@ static void rebuildChunk(int cx, int cz) {
     Chunk &chunk = chunks[{cx, cz}];
     std::vector<float> verts;
     verts.reserve(16 * 16 * 36 * 5);
-    
+
     for (int lx = 0; lx < 16; lx++){
         for (int lz = 0; lz < 16; lz++){
             int wx = cx * 16 + lx;
@@ -481,7 +503,10 @@ static void rebuildChunk(int cx, int cz) {
                 const int oceanWaterLayers = 6;
                 for (int y = 0; y < oceanWaterLayers; y++){
                     addCube(verts, (float)wx, (float)y, (float)wz, BLOCK_WATER, false);
-                    waterLevels[{wx, y, wz}] = 8;
+                    {
+                        std::lock_guard<std::mutex> lock(gMapMutex);
+                        waterLevels[{wx, y, wz}] = 8;
+                    }
                 }
                 addCube(verts, (float)wx, (float)oceanWaterLayers, (float)wz, BLOCK_SAND, false);
                 addCube(verts, (float)wx, (float)(oceanWaterLayers + 1), (float)wz, BLOCK_BEDROCK, false);
@@ -489,14 +514,17 @@ static void rebuildChunk(int cx, int cz) {
                 int height = getTerrainHeightAt(wx, wz);
                 for (int y = 0; y <= height; y++){
                     std::tuple<int,int,int> key = {wx, y, wz};
-                    if (waterLevels.find(key) != waterLevels.end()){
-                        addCube(verts, (float)wx, (float)y, (float)wz, BLOCK_WATER, true);
-                        continue;
+                    {
+                        std::lock_guard<std::mutex> lock(gMapMutex);
+                        if(waterLevels.find(key) != waterLevels.end()){
+                            addCube(verts, (float)wx, (float)y, (float)wz, BLOCK_WATER, true);
+                            continue;
+                        }
                     }
                     auto it = extraBlocks.find(key);
-                    if (it != extraBlocks.end()){
+                    if(it != extraBlocks.end()){
                         BlockType ov = it->second;
-                        if ((int)ov < 0) continue;
+                        if((int)ov < 0) continue;
                         addCube(verts, (float)wx, (float)y, (float)wz, ov, true);
                     } else {
                         BlockType terr;
@@ -521,17 +549,17 @@ static void rebuildChunk(int cx, int cz) {
                 }
                 for (int y = height + 1; y < height + 20; y++){
                     std::tuple<int,int,int> key = {wx, y, wz};
-                    if (extraBlocks.find(key) != extraBlocks.end()){
+                    if(extraBlocks.find(key) != extraBlocks.end()){
                         BlockType ov = extraBlocks[key];
-                        if ((int)ov < 0) continue;
+                        if((int)ov < 0) continue;
                         addCube(verts, (float)wx, (float)y, (float)wz, ov, true);
                     }
                 }
             }
         }
     }
-    
-    for (auto &kv : waterLevels){
+
+    for(auto &kv : waterLevels) {
         int bx = std::get<0>(kv.first);
         int by = std::get<1>(kv.first);
         int bz = std::get<2>(kv.first);
@@ -540,7 +568,7 @@ static void rebuildChunk(int cx, int cz) {
         if(ccx == cx && ccz == cz)
             addCube(verts, (float)bx, (float)by, (float)bz, BLOCK_WATER, true);
     }
-    
+
     chunk.vertices = verts;
     glBindVertexArray(chunk.VAO);
     glBindBuffer(GL_ARRAY_BUFFER, chunk.VBO);
@@ -550,7 +578,6 @@ static void rebuildChunk(int cx, int cz) {
 
 // -----------------------------------------------------------------------------
 // Shaders and UI drawing functions.
-// Updated world shaders now include a specular term and use the texture alpha.
 static const char* worldVertSrc = R"(
 #version 330 core
 layout(location = 0) in vec3 aPos;
@@ -560,7 +587,6 @@ out vec3 FragPos;
 out vec2 TexCoord;
 void main(){
     gl_Position = MVP * vec4(aPos, 1.0);
-    // For terrain cubes, aPos is assumed to be in world space.
     FragPos = aPos;
     TexCoord = aTex;
 }
@@ -572,31 +598,27 @@ in vec3 FragPos;
 in vec2 TexCoord;
 out vec4 FragColor;
 uniform sampler2D ourTexture;
-uniform vec3 sunDirection;  // Directional light (normalized)
-uniform vec3 viewPos;       // Camera position in world space
+uniform vec3 sunDirection;
+uniform vec3 viewPos;
 void main(){
-    // Compute normal using screen-space derivatives.
     vec3 dx = dFdx(FragPos);
     vec3 dy = dFdy(FragPos);
     vec3 normal = normalize(cross(dx, dy));
-    
-    // Diffuse component.
+
     float diff = max(dot(normal, sunDirection), 0.0);
-    
-    // Specular component.
     vec3 viewDir = normalize(viewPos - FragPos);
     vec3 reflectDir = reflect(-sunDirection, normal);
     float spec = pow(max(dot(viewDir, reflectDir), 0.0), 16.0);
-    
+
     vec3 ambient = vec3(0.4);
     vec3 diffuse = vec3(0.6) * diff;
     vec3 specular = vec3(0.2) * spec;
     vec3 lighting = ambient + diffuse + specular;
-    
+
     vec4 texColor = texture(ourTexture, TexCoord);
     if(texColor.a < 0.1)
         discard;
-    
+
     FragColor = vec4(texColor.rgb * lighting, texColor.a);
 }
 )";
@@ -653,7 +675,7 @@ int drawPauseMenu(int screenW, int screenH) {
     glDrawArrays(GL_TRIANGLES, 0, 6);
     float resumeX = 300, resumeY = 250, resumeW = 200, resumeH = 50;
     float resumeVerts[12] = { resumeX, resumeY, resumeX+resumeW, resumeY, resumeX+resumeW, resumeY+resumeH,
-                              resumeX, resumeY, resumeX+resumeW, resumeY+resumeH, resumeX, resumeY+resumeH };
+                               resumeX, resumeY, resumeX+resumeW, resumeY+resumeH, resumeX, resumeY+resumeH };
     glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(resumeVerts), resumeVerts);
     glUniform4f(glGetUniformLocation(uiShader, "uColor"), 0.2f, 0.6f, 1.0f, 1.0f);
     glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -708,6 +730,7 @@ void drawFirstPersonHand3D(int screenW, int screenH, const Mat4 &proj) {
 }
 
 int main(int /*argc*/, char* /*argv*/[]) {
+    // Spawn values: if a saved world exists, load it; else use default spawn.
     float loadedX = 0.0f, loadedY = 30.0f, loadedZ = 0.0f;
     int loadedSeed = 0;
     bool loadedOk = loadWorld("saved_world.txt", loadedSeed, loadedX, loadedY, loadedZ);
@@ -720,6 +743,11 @@ int main(int /*argc*/, char* /*argv*/[]) {
         setNoiseSeed(rseed);
         srand(rseed);
         loadedSeed = (int)rseed;
+        // Adjust spawn location to avoid Extreme Hills biome.
+        while(getBiome((int)loadedX, (int)loadedZ) == BIOME_EXTREME_HILLS) {
+            loadedX = (rand() % 201) - 100; // random between -100 and 100
+            loadedZ = (rand() % 201) - 100;
+        }
     }
     if(SDL_Init(SDL_INIT_VIDEO) < 0) {
         std::cerr << "SDL_Init Error: " << SDL_GetError() << std::endl;
@@ -776,11 +804,30 @@ int main(int /*argc*/, char* /*argv*/[]) {
     }
     initUI();
     Inventory inventory;
+    
+    // Spawn chunk generation using asynchronous method.
     int spawnChunkX = (int)std::floor(loadedX / (float)chunkSize);
     int spawnChunkZ = (int)std::floor(loadedZ / (float)chunkSize);
-    std::pair<int,int> chunkKey = {spawnChunkX, spawnChunkZ};
-    if(chunks.find(chunkKey) == chunks.end())
-        chunks[chunkKey] = generateChunk(spawnChunkX, spawnChunkZ);
+    {
+        // Build a sorted vector of chunk coordinates (closest first)
+        std::vector<std::pair<int,int>> chunkCoords;
+        for(int cx = spawnChunkX - renderDistance; cx <= spawnChunkX + renderDistance; cx++){
+            for(int cz = spawnChunkZ - renderDistance; cz <= spawnChunkZ + renderDistance; cz++){
+                chunkCoords.push_back({cx, cz});
+            }
+        }
+        std::sort(chunkCoords.begin(), chunkCoords.end(), [spawnChunkX, spawnChunkZ](const std::pair<int,int>& a, const std::pair<int,int>& b) {
+            int da = (a.first - spawnChunkX) * (a.first - spawnChunkX) + (a.second - spawnChunkZ) * (a.second - spawnChunkZ);
+            int db = (b.first - spawnChunkX) * (b.first - spawnChunkX) + (b.second - spawnChunkZ) * (b.second - spawnChunkZ);
+            return da < db;
+        });
+        for(auto &coord : chunkCoords) {
+            std::pair<int,int> key = coord;
+            if(chunks.find(key) == chunks.end())
+                startChunkGeneration(coord.first, coord.second);
+        }
+    }
+    
     Camera camera;
     camera.position = {loadedX, loadedY, loadedZ};
     camera.yaw = -3.14f/2;
@@ -792,14 +839,24 @@ int main(int /*argc*/, char* /*argv*/[]) {
     if(loadedOk) {
         int pcx = (int)std::floor(camera.position.x / (float)chunkSize);
         int pcz = (int)std::floor(camera.position.z / (float)chunkSize);
+        // Sort chunks by distance from player and generate or rebuild.
+        std::vector<std::pair<int,int>> chunkCoords;
         for(int cx = pcx - renderDistance; cx <= pcx + renderDistance; cx++){
             for(int cz = pcz - renderDistance; cz <= pcz + renderDistance; cz++){
-                std::pair<int,int> cKey = {cx, cz};
-                if(chunks.find(cKey) == chunks.end())
-                    chunks[cKey] = generateChunk(cx, cz);
-                else
-                    rebuildChunk(cx, cz);
+                chunkCoords.push_back({cx, cz});
             }
+        }
+        std::sort(chunkCoords.begin(), chunkCoords.end(), [pcx, pcz](const std::pair<int,int>& a, const std::pair<int,int>& b) {
+            int da = (a.first - pcx) * (a.first - pcx) + (a.second - pcz) * (a.second - pcz);
+            int db = (b.first - pcx) * (b.first - pcx) + (b.second - pcz) * (b.second - pcz);
+            return da < db;
+        });
+        for(auto &coord : chunkCoords) {
+            std::pair<int,int> cKey = coord;
+            if(chunks.find(cKey) == chunks.end())
+                startChunkGeneration(coord.first, coord.second);
+            else
+                rebuildChunk(coord.first, coord.second);
         }
     }
     SDL_SetRelativeMouseMode(SDL_TRUE);
@@ -821,6 +878,32 @@ int main(int /*argc*/, char* /*argv*/[]) {
                 updateWaterFlow(camera, TICK_INTERVAL);
             }
         }
+        
+        // Process pending asynchronous chunk generations.
+        processPendingChunks();
+        
+        // Build a sorted list of chunk coordinates for the current view.
+        int pcx = (int)std::floor(camera.position.x/(float)chunkSize);
+        int pcz = (int)std::floor(camera.position.z/(float)chunkSize);
+        {
+            std::vector<std::pair<int,int>> chunkCoords;
+            for(int cx = pcx - renderDistance; cx <= pcx + renderDistance; cx++){
+                for(int cz = pcz - renderDistance; cz <= pcz + renderDistance; cz++){
+                    chunkCoords.push_back({cx, cz});
+                }
+            }
+            std::sort(chunkCoords.begin(), chunkCoords.end(), [pcx, pcz](const std::pair<int,int>& a, const std::pair<int,int>& b) {
+                int da = (a.first - pcx) * (a.first - pcx) + (a.second - pcz) * (a.second - pcz);
+                int db = (b.first - pcx) * (b.first - pcx) + (b.second - pcz) * (b.second - pcz);
+                return da < db;
+            });
+            for(auto &coord : chunkCoords) {
+                std::pair<int,int> key = coord;
+                if(chunks.find(key) == chunks.end())
+                    startChunkGeneration(coord.first, coord.second);
+            }
+        }
+        
         while(SDL_PollEvent(&ev)) {
             if(ev.type == SDL_QUIT) running = false;
             else if(ev.type == SDL_KEYDOWN) {
@@ -1000,15 +1083,29 @@ int main(int /*argc*/, char* /*argv*/[]) {
             }
         }
         inventory.update(dt, camera);
-        int pcx = (int)std::floor(camera.position.x/(float)chunkSize);
-        int pcz = (int)std::floor(camera.position.z/(float)chunkSize);
-        for(int cx = pcx - renderDistance; cx <= pcx + renderDistance; cx++){
-            for(int cz = pcz - renderDistance; cz <= pcz + renderDistance; cz++){
-                std::pair<int,int> key = {cx, cz};
+        
+        // Use asynchronous chunk generation: sort chunks by distance before scheduling.
+        {
+            int pcx = (int)std::floor(camera.position.x/(float)chunkSize);
+            int pcz = (int)std::floor(camera.position.z/(float)chunkSize);
+            std::vector<std::pair<int,int>> chunkCoords;
+            for(int cx = pcx - renderDistance; cx <= pcx + renderDistance; cx++){
+                for(int cz = pcz - renderDistance; cz <= pcz + renderDistance; cz++){
+                    chunkCoords.push_back({cx, cz});
+                }
+            }
+            std::sort(chunkCoords.begin(), chunkCoords.end(), [pcx, pcz](const std::pair<int,int>& a, const std::pair<int,int>& b) {
+                int da = (a.first - pcx) * (a.first - pcx) + (a.second - pcz) * (a.second - pcz);
+                int db = (b.first - pcx) * (b.first - pcx) + (b.second - pcz) * (b.second - pcz);
+                return da < db;
+            });
+            for(auto &coord : chunkCoords) {
+                std::pair<int,int> key = coord;
                 if(chunks.find(key) == chunks.end())
-                    chunks[key] = generateChunk(cx, cz);
+                    startChunkGeneration(coord.first, coord.second);
             }
         }
+        
         glClearColor(0.53f, 0.81f, 0.92f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glUseProgram(worldShader);
@@ -1016,11 +1113,10 @@ int main(int /*argc*/, char* /*argv*/[]) {
         glBindTexture(GL_TEXTURE_2D, texID);
         GLint uniTex = glGetUniformLocation(worldShader, "ourTexture");
         glUniform1i(uniTex, 0);
-        // Set directional light and view position for realistic lighting.
         Vec3 sunDir = normalize({0.3f, 1.0f, 0.3f});
         glUniform3f(glGetUniformLocation(worldShader, "sunDirection"), sunDir.x, sunDir.y, sunDir.z);
         glUniform3f(glGetUniformLocation(worldShader, "viewPos"), camera.position.x, camera.position.y, camera.position.z);
-        
+
         Vec3 eyePos = camera.position; eyePos.y += 1.6f;
         Vec3 viewDir = { cos(camera.yaw)*cos(camera.pitch),
                          sin(camera.pitch),
@@ -1031,22 +1127,24 @@ int main(int /*argc*/, char* /*argv*/[]) {
                                            (float)SCREEN_WIDTH/(float)SCREEN_HEIGHT,
                                            0.1f, 100.0f);
         Mat4 pv = multiplyMatrix(projWorld, view);
-        for(auto &pair: chunks){
-            int cX = pair.first.first, cZ = pair.first.second;
-            if(std::abs(cX-pcx) > renderDistance || std::abs(cZ-pcz) > renderDistance)
-                continue;
-            Chunk &ch = pair.second;
-            Mat4 mvp = multiplyMatrix(pv, identityMatrix());
-            GLint mvpLoc = glGetUniformLocation(worldShader, "MVP");
-            glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, mvp.m);
-            glBindVertexArray(ch.VAO);
-            glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(ch.vertices.size()/5));
+        {
+            int pcx = (int)std::floor(camera.position.x/(float)chunkSize);
+            int pcz = (int)std::floor(camera.position.z/(float)chunkSize);
+            for(auto &pair: chunks){
+                int cX = pair.first.first, cZ = pair.first.second;
+                if(std::abs(cX-pcx) > renderDistance || std::abs(cZ-pcz) > renderDistance)
+                    continue;
+                Chunk &ch = pair.second;
+                Mat4 mvp = multiplyMatrix(pv, identityMatrix());
+                GLint mvpLoc = glGetUniformLocation(worldShader, "MVP");
+                glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, mvp.m);
+                glBindVertexArray(ch.VAO);
+                glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(ch.vertices.size()/5));
+            }
         }
         glUseProgram(uiShader);
         drawFlyIndicator(isFlying, SCREEN_WIDTH, SCREEN_HEIGHT);
         inventory.render();
-        // Render held item: if a block is selected, render it as a 3D cube;
-        // otherwise, render the hand as a rectangle.
         if(inventory.getSelectedBlock() != BLOCK_NONE) {
             glDisable(GL_DEPTH_TEST);
             renderHeldBlock3D(projWorld, inventory.getSelectedBlock());
@@ -1068,5 +1166,76 @@ int main(int /*argc*/, char* /*argv*/[]) {
     SDL_DestroyWindow(window);
     SDL_Quit();
     return 0;
+}
+
+// -------------------------
+// updateWaterFlow function definition.
+static void updateWaterFlow(const Camera &camera, float /*dt*/) {
+    static const int NEAR_CHUNK_RADIUS = 2;
+    int playerChunkX = (int)std::floor(camera.position.x / (float)chunkSize);
+    int playerChunkZ = (int)std::floor(camera.position.z / (float)chunkSize);
+    std::vector<std::tuple<int,int,int>> waterKeys;
+    {
+        std::lock_guard<std::mutex> lock(gMapMutex);
+        for(auto &entry : waterLevels)
+            waterKeys.push_back(entry.first);
+    }
+    for(auto key : waterKeys) {
+        int x, y, z;
+        std::tie(x, y, z) = key;
+        int cellChunkX = x / 16; if(x < 0 && x % 16 != 0) cellChunkX--;
+        int cellChunkZ = z / 16; if(z < 0 && z % 16 != 0) cellChunkZ--;
+        if (std::abs(cellChunkX - playerChunkX) > NEAR_CHUNK_RADIUS ||
+            std::abs(cellChunkZ - playerChunkZ) > NEAR_CHUNK_RADIUS)
+            continue;
+        int level = 0;
+        {
+            std::lock_guard<std::mutex> lock(gMapMutex);
+            level = waterLevels[key];
+        }
+        if(y > 0 && canWaterFlowInto(x, y - 1, z)) {
+            std::tuple<int,int,int> below = {x, y - 1, z};
+            int belowLevel = 0;
+            {
+                std::lock_guard<std::mutex> lock(gMapMutex);
+                if(waterLevels.find(below) != waterLevels.end())
+                    belowLevel = waterLevels[below];
+            }
+            if(8 > belowLevel) {
+                {
+                    std::lock_guard<std::mutex> lock(gMapMutex);
+                    waterLevels[below] = 8;
+                }
+                int cx, cz; getChunkCoords(x, z, cx, cz);
+                rebuildChunk(cx, cz);
+            }
+        }
+        if(level > 1) {
+            int offsets[4][3] = { {1,0,0}, {-1,0,0}, {0,0,1}, {0,0,-1} };
+            for(int i = 0; i < 4; i++) {
+                int nx = x + offsets[i][0];
+                int ny = y;
+                int nz = z + offsets[i][2];
+                if(!canWaterFlowInto(nx, ny, nz))
+                    continue;
+                std::tuple<int,int,int> neighbor = {nx, ny, nz};
+                int neighborLevel = 0;
+                {
+                    std::lock_guard<std::mutex> lock(gMapMutex);
+                    if(waterLevels.find(neighbor) != waterLevels.end())
+                        neighborLevel = waterLevels[neighbor];
+                }
+                int newLevel = level - 1;
+                if(newLevel > neighborLevel && newLevel > 1) {
+                    {
+                        std::lock_guard<std::mutex> lock(gMapMutex);
+                        waterLevels[neighbor] = newLevel;
+                    }
+                    int cx, cz; getChunkCoords(nx, nz, cx, cz);
+                    rebuildChunk(cx, cz);
+                }
+            }
+        }
+    }
 }
 
