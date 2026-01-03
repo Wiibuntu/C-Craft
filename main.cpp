@@ -15,121 +15,138 @@
 #include <random>
 #include <algorithm>
 #include <atomic>
+#include <sstream>
+#include <iomanip>
 
-#include "math.h"       // identityMatrix(), multiplyMatrix(), vector math, etc.
-#include "shader.h"     // Shader compilation and program creation
-#include "cube.h"       // BlockType definitions and addCube()
+#include "math.h"
+#include "shader.h"
+#include "cube.h"
 #include "camera.h"
-#include "texture.h"    // loadTexture()
+#include "texture.h"
 #include "noise.h"
 #include "world.h"
 #include "inventory.h"
 #include "globals.h"
 
-// Global texture variable for the hand.
+// -------------------- GLOBALS --------------------
 GLuint handTex = 0;
 
-#ifndef BLOCK_NONE
-#define BLOCK_NONE -1
-#endif
-
-// Forward declarations for UI functions.
-int drawPauseMenu(int screenW, int screenH);
-void drawFlyIndicator(bool isFlying, int screenW, int screenH);
-void drawFirstPersonHand3D(int screenW, int screenH, const Mat4 &proj); // unused
-
-// --- Helper functions for constructing model matrices ---
-Mat4 translateMatrix(float tx, float ty, float tz) {
-    Mat4 mat = identityMatrix();
-    mat.m[12] = tx;
-    mat.m[13] = ty;
-    mat.m[14] = tz;
-    return mat;
-}
-
-Mat4 scaleMatrix(float sx, float sy, float sz) {
-    Mat4 mat = identityMatrix();
-    mat.m[0]  = sx;
-    mat.m[5]  = sy;
-    mat.m[10] = sz;
-    return mat;
-}
-
-// --- Additional helper functions ---
-static float smoothstep(float edge0, float edge1, float x) {
-    float t = (x - edge0) / (edge1 - edge0);
-    if(t < 0) t = 0;
-    if(t > 1) t = 1;
-    return t * t * (3 - 2 * t);
-}
-
-static float mix(float a, float b, float t) {
-    return a + t * (b - a);
-}
-
-// --- Global constant for tick timing ---
-static const float TICK_INTERVAL = 0.5f; // seconds per tick
-
-// --- Player physical constants ---
-// "2 blocks tall" collision capsule and "2 blocks high" camera per your request.
-static const float playerWidth  = 0.6f;
-static const float playerHeight = 2.0f;
-static const float EYE_HEIGHT   = 2.0f;
-
-static const float WORLD_FLOOR_LIMIT = -10.0f;
-
-static const float GRAVITY    = -9.81f;
-static const float JUMP_SPEED =  5.0f;
-
-// Screen size
+// Screen (declared extern in globals.h)
 int SCREEN_WIDTH  = 960;
-int SCREEN_HEIGHT = 480;
+int SCREEN_HEIGHT = 540;
+
+// UI shader + quad buffer
+GLuint uiShader = 0;
+GLuint uiVAO = 0;
+GLuint uiVBO = 0;
+
+// World shader/texture (declared extern in globals.h)
+GLuint worldShader = 0;
+GLuint texID = 0;
 
 // Chunk settings
-static const int chunkSize      = 16;
+static const int chunkSize = 16;
 static const int renderDistance = 10;
-
-// Chunk streaming limits (stutter fix)
-// - How many chunk uploads we allow per frame
 static const int MAX_CHUNK_UPLOADS_PER_FRAME = 2;
 
-// GL objects
-GLuint worldShader = 0;
-GLuint texID       = 0;
+// Sea level + vertical limits
+static const int SEA_LEVEL = 24;
+static const int MAX_WORLD_Y = 112;
+static const int MIN_WORLD_Y = 0;
 
-GLuint uiShader    = 0;
-GLuint uiVAO       = 0;
-GLuint uiVBO       = 0;
+// Timing
+static const float TICK_INTERVAL = 0.5f;
 
+// Player physics
+static const float playerWidth  = 0.6f;
+static const float playerHeight = 2.0f;
+static const float EYE_HEIGHT   = 2.0f; // camera 2 blocks high
+static const float WORLD_FLOOR_LIMIT = -10.0f;
+static const float GRAVITY = -9.81f;
+static const float JUMP_SPEED = 5.0f;
+
+// -------------------- HELPERS --------------------
+static float clampf(float v, float a, float b) { return std::max(a, std::min(b, v)); }
+
+Mat4 translateMatrix(float tx, float ty, float tz) {
+    Mat4 mat = identityMatrix();
+    mat.m[12] = tx; mat.m[13] = ty; mat.m[14] = tz;
+    return mat;
+}
+Mat4 scaleMatrix(float sx, float sy, float sz) {
+    Mat4 mat = identityMatrix();
+    mat.m[0] = sx; mat.m[5] = sy; mat.m[10] = sz;
+    return mat;
+}
+static float smoothstep(float edge0, float edge1, float x) {
+    float t = (x - edge0) / (edge1 - edge0);
+    t = clampf(t, 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+static float mix(float a, float b, float t) { return a + t * (b - a); }
+
+// Local "pseudo-3D" noise built from 2D perlin/fbm, so we don't need noise.h changes.
+static float noise3Pseudo(float x, float y, float z) {
+    float a = perlinNoise(x, y);
+    float b = perlinNoise(y, z);
+    float c = perlinNoise(x, z);
+    return (a + b + c) * (1.0f / 3.0f); // roughly [-1..1]
+}
+static float fbmNoise3Pseudo(float x, float y, float z, int octaves, float lacunarity, float gain) {
+    float amp = 1.0f;
+    float freq = 1.0f;
+    float sum = 0.0f;
+    float norm = 0.0f;
+    for(int i=0;i<octaves;i++){
+        sum += noise3Pseudo(x*freq, y*freq, z*freq) * amp;
+        norm += amp;
+        amp *= gain;
+        freq *= lacunarity;
+    }
+    if(norm > 0.0f) sum /= norm;
+    return sum;
+}
+
+// -------------------- BIOMES --------------------
+enum Biome {
+    BIOME_OCEAN,
+    BIOME_BEACH,
+    BIOME_PLAINS,
+    BIOME_FOREST,
+    BIOME_DESERT,
+    BIOME_TAIGA,
+    BIOME_SWAMP,
+    BIOME_EXTREME_HILLS
+};
+
+static const char* biomeToString(Biome b) {
+    switch(b) {
+        case BIOME_OCEAN:         return "OCEAN";
+        case BIOME_BEACH:         return "BEACH";
+        case BIOME_PLAINS:        return "PLAINS";
+        case BIOME_FOREST:        return "FOREST";
+        case BIOME_DESERT:        return "DESERT";
+        case BIOME_TAIGA:         return "TAIGA";
+        case BIOME_SWAMP:         return "SWAMP";
+        case BIOME_EXTREME_HILLS: return "EXTREME_HILLS";
+        default:                  return "UNKNOWN";
+    }
+}
+
+// -------------------- WORLD STATE --------------------
 struct Chunk {
     int chunkX, chunkZ;
     std::vector<float> vertices;
-    GLuint VAO, VBO;
+    GLuint VAO = 0, VBO = 0;
 };
-
 std::unordered_map<std::pair<int,int>, Chunk, PairHash> chunks;
 
-enum Biome {
-    BIOME_PLAINS,
-    BIOME_DESERT,
-    BIOME_EXTREME_HILLS,
-    BIOME_FOREST,
-    BIOME_OCEAN
-};
+// World state accessed from worker + main thread
+static std::mutex gWorldMutex;
 
-// ----------------------------------------------------------------------------
-// Chunk background generation queues (CPU only)
-// ----------------------------------------------------------------------------
-struct ChunkJob {
-    int cx, cz;
-    bool rebuild; // if true, chunk exists and we want to rebuild it
-};
-
-struct ChunkResult {
-    int cx, cz;
-    std::vector<float> verts;
-    bool rebuild;
-};
+// -------------------- ASYNC CHUNK PIPELINE --------------------
+struct ChunkJob { int cx, cz; bool rebuild; };
+struct ChunkResult { int cx, cz; std::vector<float> verts; bool rebuild; };
 
 static std::mutex gJobMutex;
 static std::condition_variable gJobCV;
@@ -140,641 +157,14 @@ static std::queue<ChunkResult> gDoneQueue;
 
 static std::atomic<bool> gWorkerRunning{true};
 
-// Track which chunks are already requested so we don't spam jobs.
 static std::mutex gRequestedMutex;
-static std::unordered_set<long long> gRequested; // packed (cx,cz)
+static std::unordered_set<long long> gRequested;
 
-// pack key
 static long long packChunkKey(int cx, int cz) {
-    return ( (long long)cx << 32 ) ^ (unsigned int)cz;
+    return ((long long)cx << 32) ^ (unsigned int)cz;
 }
 
-// Forward declarations
-static bool raycastBlock(const Vec3 &start, const Vec3 &dir, float maxDist, int &outX, int &outY, int &outZ);
-static void rebuildChunkAsync(int cx, int cz);
-static void requestChunkAsync(int cx, int cz);
-
-// ----------------------------------------------------------------------------
-// Raycast
-// ----------------------------------------------------------------------------
-static bool raycastBlock(const Vec3 &start, const Vec3 &dir, float maxDist, int &outX, int &outY, int &outZ) {
-    float step = 0.1f, traveled = 0.0f;
-    while(traveled < maxDist) {
-        Vec3 pos = add(start, multiply(dir, traveled));
-        int bx = (int)std::floor(pos.x);
-        int by = (int)std::floor(pos.y);
-        int bz = (int)std::floor(pos.z);
-        std::tuple<int,int,int> key = {bx, by, bz};
-        if(isSolidBlock(bx, by, bz) ||
-            (extraBlocks.find(key) != extraBlocks.end() && extraBlocks[key] == BLOCK_LEAVES)) {
-            outX = bx; outY = by; outZ = bz;
-            return true;
-        }
-        traveled += step;
-    }
-    return false;
-}
-
-// ----------------------------------------------------------------------------
-// First-person hand / held block
-// ----------------------------------------------------------------------------
-void renderHeldBlock3D(const Mat4 &proj, int activeBlock) {
-    Mat4 model = identityMatrix();
-    model = multiplyMatrix(model, translateMatrix(0.8f, -0.8f, -1.5f));
-    Mat4 rotY = identityMatrix();
-    float angle = 0.3f;
-    rotY.m[0]  = cos(angle);
-    rotY.m[2]  = sin(angle);
-    rotY.m[8]  = -sin(angle);
-    rotY.m[10] = cos(angle);
-    model = multiplyMatrix(model, rotY);
-    model = multiplyMatrix(model, scaleMatrix(0.5f, 0.5f, 0.5f));
-    Mat4 mvp = multiplyMatrix(proj, model);
-
-    glUseProgram(worldShader);
-    GLint mvpLoc = glGetUniformLocation(worldShader, "MVP");
-    glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, mvp.m);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, texID);
-    GLint texLoc = glGetUniformLocation(worldShader, "ourTexture");
-    glUniform1i(texLoc, 0);
-
-    std::vector<float> verts;
-    verts.reserve(36 * 5);
-    addCube(verts, 0.0f, 0.0f, 0.0f, (BlockType)activeBlock, false);
-
-    GLuint heldVAO, heldVBO;
-    glGenVertexArrays(1, &heldVAO);
-    glGenBuffers(1, &heldVBO);
-    glBindVertexArray(heldVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, heldVBO);
-    glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-
-    glDrawArrays(GL_TRIANGLES, 0, 36);
-
-    glBindVertexArray(0);
-    glDeleteBuffers(1, &heldVBO);
-    glDeleteVertexArrays(1, &heldVAO);
-}
-
-void renderHandRect(const Mat4 &proj) {
-    float handVerts[] = {
-        0.0f,  0.0f, 0.0f,   0.0f, 0.0f,
-        1.0f,  0.0f, 0.0f,   1.0f, 0.0f,
-        1.0f,  1.0f, 0.0f,   1.0f, 1.0f,
-
-        0.0f,  0.0f, 0.0f,   0.0f, 0.0f,
-        1.0f,  1.0f, 0.0f,   1.0f, 1.0f,
-        0.0f,  1.0f, 0.0f,   0.0f, 1.0f
-    };
-
-    Mat4 model = identityMatrix();
-    model = multiplyMatrix(model, translateMatrix(0.8f, -0.8f, -0.8f));
-    Mat4 rotZ = identityMatrix();
-    float angle = 0.2f;
-    rotZ.m[0] = cos(angle);
-    rotZ.m[1] = -sin(angle);
-    rotZ.m[4] = sin(angle);
-    rotZ.m[5] = cos(angle);
-    model = multiplyMatrix(model, rotZ);
-    model = multiplyMatrix(model, scaleMatrix(0.7f, 0.4f, 1.0f));
-
-    Mat4 mvp = multiplyMatrix(proj, model);
-
-    glUseProgram(worldShader);
-    GLint mvpLoc = glGetUniformLocation(worldShader, "MVP");
-    glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, mvp.m);
-
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, handTex);
-    GLint texLoc = glGetUniformLocation(worldShader, "ourTexture");
-    glUniform1i(texLoc, 0);
-
-    GLuint handVAO, handVBO;
-    glGenVertexArrays(1, &handVAO);
-    glGenBuffers(1, &handVBO);
-    glBindVertexArray(handVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, handVBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(handVerts), handVerts, GL_STATIC_DRAW);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-
-    glBindVertexArray(0);
-    glDeleteBuffers(1, &handVBO);
-    glDeleteVertexArrays(1, &handVAO);
-}
-
-// -----------------------------------------------------------------------------
-// Biomes + terrain height (already fixed/clamped)
-// -----------------------------------------------------------------------------
-static Biome getBiome(int x, int z) {
-    float oceanNoise = perlinNoise(x * 0.001f, z * 0.001f);
-    if(oceanNoise < -0.8f)
-        return BIOME_OCEAN;
-
-    float desertNoise = perlinNoise(x * 0.0007f, z * 0.0007f);
-    if(desertNoise < -0.2f)
-        return BIOME_DESERT;
-
-    float combined = perlinNoise(x * 0.005f, z * 0.005f);
-    if(combined < -0.1f)
-        return BIOME_PLAINS;
-    else if(combined < 0.0f)
-        return BIOME_FOREST;
-    else
-        return BIOME_EXTREME_HILLS;
-}
-
-int getTerrainHeightAt(int x, int z) {
-    Biome b = getBiome(x, z);
-    if(b == BIOME_OCEAN)
-        return 8;
-
-    float normalNoise  = fbmNoise(x * 0.01f, z * 0.01f, 6, 2.0f, 0.5f);
-    float normalHeight = ((normalNoise + 1.0f) * 0.5f) * (b == BIOME_DESERT ? 18.0f : 24.0f);
-
-    float hillsNoise = fbmNoise(x * 0.0025f, z * 0.0025f, 6, 2.0f, 0.5f);
-    float ridge      = 1.0f - fabs(hillsNoise);
-    ridge            = ridge * ridge;
-
-    float extremeHeight = (b == BIOME_DESERT)
-        ? 18.0f + ridge * 24.0f
-        : 24.0f + ridge * 36.0f;
-
-    float combined = perlinNoise(x * 0.005f, z * 0.005f);
-    float blend    = smoothstep(-0.1f, 0.1f, combined);
-
-    float finalHeight = mix(normalHeight, extremeHeight, blend);
-
-    if(finalHeight < 2.0f)  finalHeight = 2.0f;
-    if(finalHeight > 64.0f) finalHeight = 64.0f;
-
-    return (int) finalHeight;
-}
-
-// -----------------------------------------------------------------------------
-// Collision + solidity
-// -----------------------------------------------------------------------------
-static bool blockHasCollision(BlockType t) {
-    return (t != BLOCK_WATER);
-}
-
-bool isSolidBlock(int bx, int by, int bz) {
-    auto key = std::make_tuple(bx, by, bz);
-    if(extraBlocks.find(key) != extraBlocks.end()){
-        BlockType t = extraBlocks[key];
-        if((int)t < 0) return false;
-        return blockHasCollision(t);
-    }
-    if(waterLevels.find(key) != waterLevels.end())
-        return false;
-    int h = getTerrainHeightAt(bx, bz);
-    return (by >= 0 && by <= h);
-}
-
-// Collision check uses player FEET position (capsule base)
-static bool checkCollisionFeet(const Vec3 &feetPos) {
-    float half = playerWidth * 0.5f;
-    float minX = feetPos.x - half, maxX = feetPos.x + half;
-    float minY = feetPos.y,        maxY = feetPos.y + playerHeight;
-    float minZ = feetPos.z - half, maxZ = feetPos.z + half;
-
-    int startX = (int)std::floor(minX), endX = (int)std::floor(maxX);
-    int startY = (int)std::floor(minY), endY = (int)std::floor(maxY);
-    int startZ = (int)std::floor(minZ), endZ = (int)std::floor(maxZ);
-
-    for(int bx = startX; bx <= endX; bx++){
-        for(int by = startY; by <= endY; by++){
-            for(int bz = startZ; bz <= endZ; bz++){
-                if(isSolidBlock(bx, by, bz)){
-                    if(maxX > bx && minX < bx+1 &&
-                       maxY > by && minY < by+1 &&
-                       maxZ > bz && minZ < bz+1)
-                        return true;
-                }
-            }
-        }
-    }
-    return false;
-}
-
-// -----------------------------------------------------------------------------
-// Spawn safety helpers
-// -----------------------------------------------------------------------------
-static int surfaceYAt(int x, int z) {
-    int h = getTerrainHeightAt(x, z);
-    if(h < 0) h = 0;
-    return h;
-}
-
-// sanitize expects FEET coords
-static void sanitizeLoadedSpawn(float &x, float &y, float &z) {
-    int tx = (int)std::floor(x);
-    int tz = (int)std::floor(z);
-
-    int surface = surfaceYAt(tx, tz) + 2;
-    if(y < (float)surface)
-        y = (float)surface;
-
-    Vec3 pos = {x, y, z};
-    int lift = 0;
-    while(lift < 256 && checkCollisionFeet(pos)) {
-        pos.y += 1.0f;
-        lift++;
-    }
-
-    x = pos.x;
-    y = pos.y;
-    z = pos.z;
-}
-
-static void findSafeSpawn(float &outX, float &outY, float &outZ) {
-    const int maxRadius = 128;
-    const int step      = 4;
-
-    int bestX = 0, bestZ = 0;
-    int bestScore = 1000000000;
-
-    for(int r = 0; r <= maxRadius; r += step) {
-        for(int dx = -r; dx <= r; dx += step) {
-            for(int dz = -r; dz <= r; dz += step) {
-                if(abs(dx) != r && abs(dz) != r) continue;
-
-                int x = dx;
-                int z = dz;
-
-                Biome b = getBiome(x, z);
-                if(b == BIOME_OCEAN) continue;
-
-                int h  = surfaceYAt(x, z);
-
-                int hE = surfaceYAt(x + 4, z);
-                int hW = surfaceYAt(x - 4, z);
-                int hN = surfaceYAt(x, z + 4);
-                int hS = surfaceYAt(x, z - 4);
-                int slope = std::max(std::max(abs(hE - hW), abs(hN - hS)),
-                                     std::max(abs(hE - h),  abs(hN - h)));
-
-                int score = slope * 10 + abs(h - 20);
-                if(score >= bestScore) continue;
-
-                Vec3 pos = {(float)x + 0.5f, (float)h + 2.0f, (float)z + 0.5f};
-
-                int lift = 0;
-                while(lift < 256 && checkCollisionFeet(pos)) {
-                    pos.y += 1.0f;
-                    lift++;
-                }
-                if(lift >= 256) continue;
-
-                bestScore = score;
-                bestX = x;
-                bestZ = z;
-            }
-        }
-        if(bestScore <= 15) break;
-    }
-
-    int h = surfaceYAt(bestX, bestZ);
-    outX = (float)bestX + 0.5f;
-    outZ = (float)bestZ + 0.5f;
-    outY = (float)h + 2.0f;
-
-    Vec3 pos = {outX, outY, outZ};
-    int lift = 0;
-    while(lift < 256 && checkCollisionFeet(pos)) {
-        pos.y += 1.0f;
-        lift++;
-    }
-    outY = pos.y;
-}
-
-// -----------------------------------------------------------------------------
-// Water flow
-// -----------------------------------------------------------------------------
-bool canWaterFlowInto(int x, int y, int z) {
-    std::tuple<int,int,int> key = {x, y, z};
-    if(extraBlocks.find(key) != extraBlocks.end())
-        return false;
-    Biome b = getBiome(x, z);
-    if(b != BIOME_OCEAN) {
-        int terrainHeight = getTerrainHeightAt(x, z);
-        if(y <= terrainHeight)
-            return false;
-    }
-    return true;
-}
-
-static void getChunkCoords(int bx, int bz, int &cx, int &cz) {
-    cx = bx / 16; if(bx < 0 && bx % 16 != 0) cx--;
-    cz = bz / 16; if(bz < 0 && bz % 16 != 0) cz--;
-}
-
-static const int NEAR_CHUNK_RADIUS = 2;
-
-// Instead of rebuildChunk() (which used to do heavy work on main thread),
-// we queue rebuilds asynchronously to avoid stutter.
-static void updateWaterFlow(const Camera &camera, float /*dt*/) {
-    int playerChunkX = (int)std::floor(camera.position.x / (float)chunkSize);
-    int playerChunkZ = (int)std::floor(camera.position.z / (float)chunkSize);
-
-    std::vector<std::tuple<int,int,int>> waterKeys;
-    waterKeys.reserve(waterLevels.size());
-    for(auto &entry : waterLevels)
-        waterKeys.push_back(entry.first);
-
-    for(auto key : waterKeys) {
-        int x, y, z;
-        std::tie(x, y, z) = key;
-
-        int cellChunkX = x / 16; if(x < 0 && x % 16 != 0) cellChunkX--;
-        int cellChunkZ = z / 16; if(z < 0 && z % 16 != 0) cellChunkZ--;
-        if (std::abs(cellChunkX - playerChunkX) > NEAR_CHUNK_RADIUS ||
-            std::abs(cellChunkZ - playerChunkZ) > NEAR_CHUNK_RADIUS)
-            continue;
-
-        int level = waterLevels[key];
-
-        if(y > 0 && canWaterFlowInto(x, y - 1, z)) {
-            std::tuple<int,int,int> below = {x, y - 1, z};
-            int belowLevel = 0;
-            if(waterLevels.find(below) != waterLevels.end())
-                belowLevel = waterLevels[below];
-
-            if(8 > belowLevel) {
-                waterLevels[below] = 8;
-                int cx, cz;
-                getChunkCoords(x, z, cx, cz);
-                rebuildChunkAsync(cx, cz);
-            }
-        }
-
-        if(level > 1) {
-            int offsets[4][3] = { {1,0,0}, {-1,0,0}, {0,0,1}, {0,0,-1} };
-            for(int i = 0; i < 4; i++) {
-                int nx = x + offsets[i][0];
-                int ny = y;
-                int nz = z + offsets[i][2];
-                if(!canWaterFlowInto(nx, ny, nz))
-                    continue;
-
-                std::tuple<int,int,int> neighbor = {nx, ny, nz};
-                int neighborLevel = 0;
-                if(waterLevels.find(neighbor) != waterLevels.end())
-                    neighborLevel = waterLevels[neighbor];
-
-                int newLevel = level - 1;
-                if(newLevel > neighborLevel && newLevel > 1) {
-                    waterLevels[neighbor] = newLevel;
-                    int cx, cz;
-                    getChunkCoords(nx, nz, cx, cz);
-                    rebuildChunkAsync(cx, cz);
-                }
-            }
-        }
-    }
-}
-
-// -----------------------------------------------------------------------------
-// Chunk vertex building (CPU only) — runs on worker thread.
-// This is the key stutter fix: no GL calls in here.
-// -----------------------------------------------------------------------------
-static void buildChunkVerticesCPU(int cx, int cz, std::vector<float> &outVerts) {
-    outVerts.clear();
-    outVerts.reserve(16 * 16 * 36 * 5);
-
-    for(int lx = 0; lx < 16; lx++){
-        for(int lz = 0; lz < 16; lz++){
-            int wx = cx * 16 + lx;
-            int wz = cz * 16 + lz;
-
-            Biome b = getBiome(wx, wz);
-            if(b == BIOME_OCEAN){
-                const int oceanWaterHeight = 6;
-                for(int y = 0; y < oceanWaterHeight; y++){
-                    addCube(outVerts, (float)wx, (float)y, (float)wz, BLOCK_WATER, false);
-                }
-                addCube(outVerts, (float)wx, (float)oceanWaterHeight, (float)wz, BLOCK_SAND, false);
-            } else {
-                int height = getTerrainHeightAt(wx, wz);
-                for(int y = 0; y <= height; y++){
-                    std::tuple<int,int,int> key = {wx, y, wz};
-
-                    // Overrides (including carve out)
-                    auto exIt = extraBlocks.find(key);
-                    if(exIt != extraBlocks.end()){
-                        BlockType ov = exIt->second;
-                        if((int)ov < 0) continue; // carved
-                        addCube(outVerts, (float)wx, (float)y, (float)wz, ov, true);
-                        continue;
-                    }
-
-                    if(waterLevels.find(key) != waterLevels.end())
-                        continue;
-
-                    BlockType terr;
-                    if(b == BIOME_DESERT){
-                        const int sandLayers = 2;
-                        const int dirtLayers = 3;
-                        if(y >= height - sandLayers)
-                            terr = BLOCK_SAND;
-                        else if(y >= height - (sandLayers + dirtLayers))
-                            terr = BLOCK_DIRT;
-                        else
-                            terr = BLOCK_STONE;
-                    } else {
-                        if(y == height)
-                            terr = BLOCK_GRASS;
-                        else if((height - y) <= 6)
-                            terr = BLOCK_DIRT;
-                        else
-                            terr = BLOCK_STONE;
-                    }
-                    addCube(outVerts, (float)wx, (float)y, (float)wz, terr, true);
-                }
-            }
-
-            // Add overrides above terrain (trees etc)
-            int height = (b == BIOME_OCEAN) ? 6 : getTerrainHeightAt(wx, wz);
-            for (int y = height + 1; y < height + 20; y++){
-                std::tuple<int,int,int> key = {wx, y, wz};
-                auto exIt = extraBlocks.find(key);
-                if(exIt != extraBlocks.end()){
-                    BlockType ov = exIt->second;
-                    if ((int)ov < 0) continue;
-                    if(waterLevels.find(key) != waterLevels.end()) continue;
-                    addCube(outVerts, (float)wx, (float)y, (float)wz, ov, true);
-                }
-            }
-        }
-    }
-
-    // Add water cells in this chunk
-    for (auto &kv : waterLevels){
-        int bx = std::get<0>(kv.first);
-        int by = std::get<1>(kv.first);
-        int bz = std::get<2>(kv.first);
-        int ccx, ccz;
-        getChunkCoords(bx, bz, ccx, ccz);
-        if(ccx == cx && ccz == cz)
-            addCube(outVerts, (float)bx, (float)by, (float)bz, BLOCK_WATER, true);
-    }
-}
-
-// -----------------------------------------------------------------------------
-// Worker thread: consumes ChunkJob, produces ChunkResult
-// -----------------------------------------------------------------------------
-static void chunkWorkerThread() {
-    while(gWorkerRunning.load()) {
-        ChunkJob job;
-        {
-            std::unique_lock<std::mutex> lk(gJobMutex);
-            gJobCV.wait(lk, []{
-                return !gWorkerRunning.load() || !gJobQueue.empty();
-            });
-            if(!gWorkerRunning.load())
-                break;
-            job = gJobQueue.front();
-            gJobQueue.pop();
-        }
-
-        ChunkResult res;
-        res.cx = job.cx;
-        res.cz = job.cz;
-        res.rebuild = job.rebuild;
-        buildChunkVerticesCPU(job.cx, job.cz, res.verts);
-
-        {
-            std::lock_guard<std::mutex> lk(gDoneMutex);
-            gDoneQueue.push(std::move(res));
-        }
-    }
-}
-
-// -----------------------------------------------------------------------------
-// Main-thread chunk upload (GL only)
-// -----------------------------------------------------------------------------
-static void uploadChunkToGPU(int cx, int cz, const std::vector<float> &verts, bool rebuild) {
-    std::pair<int,int> key = {cx, cz};
-
-    if(rebuild) {
-        auto it = chunks.find(key);
-        if(it == chunks.end()) {
-            // If it doesn't exist yet, fall back to create.
-            rebuild = false;
-        } else {
-            // Update existing VAO/VBO
-            Chunk &chunk = it->second;
-            chunk.vertices = verts;
-            glBindVertexArray(chunk.VAO);
-            glBindBuffer(GL_ARRAY_BUFFER, chunk.VBO);
-            glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
-            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
-            glEnableVertexAttribArray(0);
-            glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
-            glEnableVertexAttribArray(1);
-            glBindVertexArray(0);
-            return;
-        }
-    }
-
-    // Create new chunk
-    Chunk chunk;
-    chunk.chunkX = cx;
-    chunk.chunkZ = cz;
-    chunk.vertices = verts;
-
-    glGenVertexArrays(1, &chunk.VAO);
-    glGenBuffers(1, &chunk.VBO);
-
-    glBindVertexArray(chunk.VAO);
-    glBindBuffer(GL_ARRAY_BUFFER, chunk.VBO);
-    glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-    glBindVertexArray(0);
-
-    chunks[key] = chunk;
-}
-
-// Request a chunk build if not already requested and not loaded.
-static void requestChunkAsync(int cx, int cz) {
-    std::pair<int,int> key = {cx, cz};
-    if(chunks.find(key) != chunks.end())
-        return;
-
-    long long packed = packChunkKey(cx, cz);
-    {
-        std::lock_guard<std::mutex> lk(gRequestedMutex);
-        if(gRequested.find(packed) != gRequested.end())
-            return;
-        gRequested.insert(packed);
-    }
-
-    {
-        std::lock_guard<std::mutex> lk(gJobMutex);
-        gJobQueue.push({cx, cz, false});
-    }
-    gJobCV.notify_one();
-}
-
-static void rebuildChunkAsync(int cx, int cz) {
-    // Only rebuild if we already have the chunk loaded.
-    std::pair<int,int> key = {cx, cz};
-    if(chunks.find(key) == chunks.end())
-        return;
-
-    // Note: rebuilds can be spammy (water). We allow repeats but you can
-    // add a "pending rebuild set" later if you want to reduce work.
-    {
-        std::lock_guard<std::mutex> lk(gJobMutex);
-        gJobQueue.push({cx, cz, true});
-    }
-    gJobCV.notify_one();
-}
-
-// -----------------------------------------------------------------------------
-// Render chunks
-// -----------------------------------------------------------------------------
-static void renderChunks(const Mat4 &view, const Mat4 &proj, const Vec3 &viewPos) {
-    glUseProgram(worldShader);
-
-    Mat4 VP = multiplyMatrix(proj, view);
-    GLint mvpLoc = glGetUniformLocation(worldShader, "MVP");
-    GLint texLoc = glGetUniformLocation(worldShader, "ourTexture");
-    GLint sunLoc = glGetUniformLocation(worldShader, "sunDirection");
-    GLint viewPosLoc = glGetUniformLocation(worldShader, "viewPos");
-
-    glUniform1i(texLoc, 0);
-    glUniform3f(sunLoc, -0.3f, 1.0f, -0.2f);
-    glUniform3f(viewPosLoc, viewPos.x, viewPos.y, viewPos.z);
-
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, texID);
-
-    for(auto &entry : chunks) {
-        Chunk &chunk = entry.second;
-        if(chunk.vertices.empty()) continue;
-        glBindVertexArray(chunk.VAO);
-        glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, VP.m);
-        glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(chunk.vertices.size() / 5));
-    }
-    glBindVertexArray(0);
-}
-
-// -----------------------------------------------------------------------------
-// Shaders and UI
-// -----------------------------------------------------------------------------
+// -------------------- SHADERS --------------------
 static const char* worldVertSrc = R"(
 #version 330 core
 layout(location = 0) in vec3 aPos;
@@ -813,8 +203,7 @@ void main(){
     vec3 lighting = ambient + diffuse + specular;
 
     vec4 texColor = texture(ourTexture, TexCoord);
-    if(texColor.a < 0.1)
-        discard;
+    if(texColor.a < 0.1) discard;
 
     FragColor = vec4(texColor.rgb * lighting, texColor.a);
 }
@@ -824,24 +213,22 @@ static const char* uiVertSrc = R"(
 #version 330 core
 layout(location=0) in vec2 aPos;
 uniform mat4 uProj;
-void main(){
-    gl_Position = uProj * vec4(aPos, 0.0, 1.0);
-}
+void main(){ gl_Position = uProj * vec4(aPos, 0.0, 1.0); }
 )";
 
 static const char* uiFragSrc = R"(
 #version 330 core
 out vec4 FragColor;
 uniform vec4 uColor;
-void main(){
-    FragColor = uColor;
-}
+void main(){ FragColor = uColor; }
 )";
 
+// -------------------- UI INIT --------------------
 static void initUI() {
     uiShader = createShaderProgram(uiVertSrc, uiFragSrc);
     glGenVertexArrays(1, &uiVAO);
     glGenBuffers(1, &uiVBO);
+
     glBindVertexArray(uiVAO);
     glBindBuffer(GL_ARRAY_BUFFER, uiVBO);
     glBufferData(GL_ARRAY_BUFFER, sizeof(float)*12, nullptr, GL_DYNAMIC_DRAW);
@@ -850,114 +237,970 @@ static void initUI() {
     glBindVertexArray(0);
 }
 
-// Simple UI (same as your existing)
-int drawPauseMenu(int screenW, int screenH) {
-    glDisable(GL_DEPTH_TEST);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glUseProgram(uiShader);
-
-    float overlayVerts[12] = {
-        0, 0, (float)screenW, 0, (float)screenW, (float)screenH,
-        0, 0, (float)screenW, (float)screenH, 0, (float)screenH
-    };
-
-    glBindVertexArray(uiVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, uiVBO);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(overlayVerts), overlayVerts);
-
+// Ortho proj in screen pixels (origin bottom-left for our UI coords)
+static Mat4 orthoPixels(int w, int h) {
     Mat4 proj = {};
-    proj.m[0]  = 2.0f/(float)screenW;
-    proj.m[5]  = 2.0f/(float)screenH;
+    proj.m[0]  = 2.0f/(float)w;
+    proj.m[5]  = 2.0f/(float)h;
     proj.m[10] = -1.0f;
     proj.m[15] = 1.0f;
     proj.m[12] = -1.0f;
     proj.m[13] = -1.0f;
-
-    glUniformMatrix4fv(glGetUniformLocation(uiShader, "uProj"), 1, GL_FALSE, proj.m);
-    glUniform4f(glGetUniformLocation(uiShader, "uColor"), 0.0f, 0.0f, 0.0f, 0.5f);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-
-    float resumeX = 300, resumeY = 250, resumeW = 200, resumeH = 50;
-    float resumeVerts[12] = {
-        resumeX, resumeY, resumeX+resumeW, resumeY, resumeX+resumeW, resumeY+resumeH,
-        resumeX, resumeY, resumeX+resumeW, resumeY+resumeH, resumeX, resumeY+resumeH
-    };
-    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(resumeVerts), resumeVerts);
-    glUniform4f(glGetUniformLocation(uiShader, "uColor"), 0.2f, 0.6f, 1.0f, 1.0f);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-
-    float quitX = 300, quitY = 150, quitW = 200, quitH = 50;
-    float quitVerts[12] = {
-        quitX, quitY, quitX+quitW, quitY, quitX+quitW, quitY+quitH,
-        quitX, quitY, quitX+quitW, quitY+quitH, quitX, quitY+quitH
-    };
-    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(quitVerts), quitVerts);
-    glUniform4f(glGetUniformLocation(uiShader, "uColor"), 1.0f, 0.3f, 0.3f, 1.0f);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-
-    int mx, my;
-    Uint32 mState = SDL_GetMouseState(&mx, &my);
-    bool leftDown = (mState & SDL_BUTTON(SDL_BUTTON_LEFT)) != 0;
-    int invY = screenH - my;
-    int result = 0;
-    if(leftDown) {
-        if(mx >= resumeX && mx <= resumeX+resumeW && invY >= resumeY && invY <= resumeY+resumeH)
-            result = 1;
-        else if(mx >= quitX && mx <= quitX+quitW && invY >= quitY && invY <= quitY+quitH)
-            result = 2;
-    }
-
-    glEnable(GL_DEPTH_TEST);
-    return result;
+    return proj;
 }
 
-void drawFlyIndicator(bool isFlying, int screenW, int screenH) {
-    float w = 20.0f, h = 20.0f;
-    float x = 5.0f;
-    float y = (float)screenH - h - 5.0f;
+static void uiDrawRect(float x, float y, float w, float h, float r, float g, float b, float a) {
+    float verts[12] = {
+        x,   y,
+        x+w, y,
+        x+w, y+h,
+        x,   y,
+        x+w, y+h,
+        x,   y+h
+    };
 
-    float r = isFlying ? 0.1f : 1.0f;
-    float g = isFlying ? 1.0f : 0.0f;
-    float b = isFlying ? 0.1f : 0.0f;
-
-    glDisable(GL_DEPTH_TEST);
     glUseProgram(uiShader);
+    Mat4 proj = orthoPixels(SCREEN_WIDTH, SCREEN_HEIGHT);
+    glUniformMatrix4fv(glGetUniformLocation(uiShader, "uProj"), 1, GL_FALSE, proj.m);
+    glUniform4f(glGetUniformLocation(uiShader, "uColor"), r, g, b, a);
 
-    float verts[12] = { x, y, x+w, y, x+w, y+h, x, y, x+w, y+h, x, y+h };
     glBindVertexArray(uiVAO);
     glBindBuffer(GL_ARRAY_BUFFER, uiVBO);
     glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(verts), verts);
-
-    Mat4 proj = {};
-    proj.m[0]  = 2.0f/(float)screenW;
-    proj.m[5]  = 2.0f/(float)screenH;
-    proj.m[10] = -1.0f;
-    proj.m[15] = 1.0f;
-    proj.m[12] = -1.0f;
-    proj.m[13] = -1.0f;
-
-    glUniformMatrix4fv(glGetUniformLocation(uiShader, "uProj"), 1, GL_FALSE, proj.m);
-    glUniform4f(glGetUniformLocation(uiShader, "uColor"), r, g, b, 1.0f);
     glDrawArrays(GL_TRIANGLES, 0, 6);
-
-    glEnable(GL_DEPTH_TEST);
+    glBindVertexArray(0);
 }
 
-void drawFirstPersonHand3D(int /*screenW*/, int /*screenH*/, const Mat4 &/*proj*/) {}
+// -------------------- 5x7 DEV FONT --------------------
+// Each glyph is 5 wide x 7 tall, stored as 7 rows of 5 bits (MSB->LSB not important; we use bit tests).
+static void glyph5x7(char c, uint8_t outRows[7]) {
+    // default = blank
+    for(int i=0;i<7;i++) outRows[i]=0;
 
-// -----------------------------------------------------------------------------
-// Main
-// -----------------------------------------------------------------------------
-int main(int /*argc*/, char* /*argv*/[]) {
-    // These are FEET coords in the save file.
+    // uppercase everything to keep table small
+    if(c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+
+    switch(c) {
+        case ' ': return;
+
+        case '-': { uint8_t r[7]={0,0,0,0b11111,0,0,0}; memcpy(outRows,r,7); return; }
+        case '_': { uint8_t r[7]={0,0,0,0,0,0,0b11111}; memcpy(outRows,r,7); return; }
+        case ':': { uint8_t r[7]={0,0b00100,0b00100,0,0b00100,0b00100,0}; memcpy(outRows,r,7); return; }
+        case '.': { uint8_t r[7]={0,0,0,0,0,0b00100,0b00100}; memcpy(outRows,r,7); return; }
+
+        // digits
+        case '0': { uint8_t r[7]={0b01110,0b10001,0b10011,0b10101,0b11001,0b10001,0b01110}; memcpy(outRows,r,7); return; }
+        case '1': { uint8_t r[7]={0b00100,0b01100,0b00100,0b00100,0b00100,0b00100,0b01110}; memcpy(outRows,r,7); return; }
+        case '2': { uint8_t r[7]={0b01110,0b10001,0b00001,0b00010,0b00100,0b01000,0b11111}; memcpy(outRows,r,7); return; }
+        case '3': { uint8_t r[7]={0b11110,0b00001,0b00001,0b01110,0b00001,0b00001,0b11110}; memcpy(outRows,r,7); return; }
+        case '4': { uint8_t r[7]={0b00010,0b00110,0b01010,0b10010,0b11111,0b00010,0b00010}; memcpy(outRows,r,7); return; }
+        case '5': { uint8_t r[7]={0b11111,0b10000,0b10000,0b11110,0b00001,0b00001,0b11110}; memcpy(outRows,r,7); return; }
+        case '6': { uint8_t r[7]={0b00110,0b01000,0b10000,0b11110,0b10001,0b10001,0b01110}; memcpy(outRows,r,7); return; }
+        case '7': { uint8_t r[7]={0b11111,0b00001,0b00010,0b00100,0b01000,0b01000,0b01000}; memcpy(outRows,r,7); return; }
+        case '8': { uint8_t r[7]={0b01110,0b10001,0b10001,0b01110,0b10001,0b10001,0b01110}; memcpy(outRows,r,7); return; }
+        case '9': { uint8_t r[7]={0b01110,0b10001,0b10001,0b01111,0b00001,0b00010,0b01100}; memcpy(outRows,r,7); return; }
+
+        // letters A-Z (minimal set used by overlay/biomes; included full for safety)
+        case 'A': { uint8_t r[7]={0b01110,0b10001,0b10001,0b11111,0b10001,0b10001,0b10001}; memcpy(outRows,r,7); return; }
+        case 'B': { uint8_t r[7]={0b11110,0b10001,0b10001,0b11110,0b10001,0b10001,0b11110}; memcpy(outRows,r,7); return; }
+        case 'C': { uint8_t r[7]={0b01110,0b10001,0b10000,0b10000,0b10000,0b10001,0b01110}; memcpy(outRows,r,7); return; }
+        case 'D': { uint8_t r[7]={0b11110,0b10001,0b10001,0b10001,0b10001,0b10001,0b11110}; memcpy(outRows,r,7); return; }
+        case 'E': { uint8_t r[7]={0b11111,0b10000,0b10000,0b11110,0b10000,0b10000,0b11111}; memcpy(outRows,r,7); return; }
+        case 'F': { uint8_t r[7]={0b11111,0b10000,0b10000,0b11110,0b10000,0b10000,0b10000}; memcpy(outRows,r,7); return; }
+        case 'G': { uint8_t r[7]={0b01110,0b10001,0b10000,0b10111,0b10001,0b10001,0b01110}; memcpy(outRows,r,7); return; }
+        case 'H': { uint8_t r[7]={0b10001,0b10001,0b10001,0b11111,0b10001,0b10001,0b10001}; memcpy(outRows,r,7); return; }
+        case 'I': { uint8_t r[7]={0b01110,0b00100,0b00100,0b00100,0b00100,0b00100,0b01110}; memcpy(outRows,r,7); return; }
+        case 'J': { uint8_t r[7]={0b00111,0b00010,0b00010,0b00010,0b10010,0b10010,0b01100}; memcpy(outRows,r,7); return; }
+        case 'K': { uint8_t r[7]={0b10001,0b10010,0b10100,0b11000,0b10100,0b10010,0b10001}; memcpy(outRows,r,7); return; }
+        case 'L': { uint8_t r[7]={0b10000,0b10000,0b10000,0b10000,0b10000,0b10000,0b11111}; memcpy(outRows,r,7); return; }
+        case 'M': { uint8_t r[7]={0b10001,0b11011,0b10101,0b10101,0b10001,0b10001,0b10001}; memcpy(outRows,r,7); return; }
+        case 'N': { uint8_t r[7]={0b10001,0b11001,0b10101,0b10011,0b10001,0b10001,0b10001}; memcpy(outRows,r,7); return; }
+        case 'O': { uint8_t r[7]={0b01110,0b10001,0b10001,0b10001,0b10001,0b10001,0b01110}; memcpy(outRows,r,7); return; }
+        case 'P': { uint8_t r[7]={0b11110,0b10001,0b10001,0b11110,0b10000,0b10000,0b10000}; memcpy(outRows,r,7); return; }
+        case 'Q': { uint8_t r[7]={0b01110,0b10001,0b10001,0b10001,0b10101,0b10010,0b01101}; memcpy(outRows,r,7); return; }
+        case 'R': { uint8_t r[7]={0b11110,0b10001,0b10001,0b11110,0b10100,0b10010,0b10001}; memcpy(outRows,r,7); return; }
+        case 'S': { uint8_t r[7]={0b01111,0b10000,0b10000,0b01110,0b00001,0b00001,0b11110}; memcpy(outRows,r,7); return; }
+        case 'T': { uint8_t r[7]={0b11111,0b00100,0b00100,0b00100,0b00100,0b00100,0b00100}; memcpy(outRows,r,7); return; }
+        case 'U': { uint8_t r[7]={0b10001,0b10001,0b10001,0b10001,0b10001,0b10001,0b01110}; memcpy(outRows,r,7); return; }
+        case 'V': { uint8_t r[7]={0b10001,0b10001,0b10001,0b10001,0b10001,0b01010,0b00100}; memcpy(outRows,r,7); return; }
+        case 'W': { uint8_t r[7]={0b10001,0b10001,0b10001,0b10101,0b10101,0b10101,0b01010}; memcpy(outRows,r,7); return; }
+        case 'X': { uint8_t r[7]={0b10001,0b10001,0b01010,0b00100,0b01010,0b10001,0b10001}; memcpy(outRows,r,7); return; }
+        case 'Y': { uint8_t r[7]={0b10001,0b10001,0b01010,0b00100,0b00100,0b00100,0b00100}; memcpy(outRows,r,7); return; }
+        case 'Z': { uint8_t r[7]={0b11111,0b00001,0b00010,0b00100,0b01000,0b10000,0b11111}; memcpy(outRows,r,7); return; }
+
+        default: return;
+    }
+}
+
+static void uiDrawText(float x, float y, const std::string &text, float scale,
+                       float r, float g, float b, float a,
+                       bool shadow)
+{
+    // Our UI coords are bottom-left origin.
+    // For "top-left overlay", caller should convert using SCREEN_HEIGHT.
+    const float px = scale;
+    const float py = scale;
+    const float charW = 6.0f * px;   // 5 px glyph + 1 px gap
+    const float charH = 8.0f * py;   // 7 px glyph + 1 px gap
+
+    auto drawPass = [&](float ox, float oy, float rr, float gg, float bb, float aa){
+        float cx = x + ox;
+        float cy = y + oy;
+        for(char c : text) {
+            uint8_t rows[7];
+            glyph5x7(c, rows);
+            for(int row=0; row<7; row++){
+                uint8_t bits = rows[row];
+                for(int col=0; col<5; col++){
+                    if(bits & (1u << (4-col))) {
+                        uiDrawRect(cx + col*px, cy + (6-row)*py, px, py, rr, gg, bb, aa);
+                    }
+                }
+            }
+            cx += charW;
+        }
+    };
+
+    if(shadow) {
+        drawPass(scale, -scale, 0.0f, 0.0f, 0.0f, a*0.75f);
+    }
+    drawPass(0.0f, 0.0f, r, g, b, a);
+}
+
+// -------------------- BIOME MAP / HEIGHT --------------------
+static void getClimate(float x, float z, float &temp01, float &humid01, float &weird01)
+{
+    float t = fbmNoise(x * 0.0008f + 100.0f, z * 0.0008f - 100.0f, 4, 2.0f, 0.5f);
+    float h = fbmNoise(x * 0.0008f - 200.0f, z * 0.0008f + 200.0f, 4, 2.0f, 0.5f);
+    float w = fbmNoise(x * 0.00035f + 999.0f, z * 0.00035f - 999.0f, 3, 2.0f, 0.5f);
+
+    temp01  = clampf((t + 1.0f) * 0.5f, 0.0f, 1.0f);
+    humid01 = clampf((h + 1.0f) * 0.5f, 0.0f, 1.0f);
+    weird01 = clampf((w + 1.0f) * 0.5f, 0.0f, 1.0f);
+}
+
+static float ridge2D(float x, float z, float freq)
+{
+    float n = fbmNoise(x * freq, z * freq, 5, 2.0f, 0.5f);
+    float r = 1.0f - std::fabs(n);
+    return r * r;
+}
+
+static float oceanMask(float x, float z)
+{
+    return fbmNoise(x * 0.0006f, z * 0.0006f, 4, 2.0f, 0.5f);
+}
+
+static Biome getBiome(int x, int z)
+{
+    float temp, humid, weird;
+    getClimate((float)x, (float)z, temp, humid, weird);
+
+    float ocean = oceanMask((float)x, (float)z);
+    if(ocean < -0.35f)
+        return BIOME_OCEAN;
+
+    // Rare extreme hills
+    float r = ridge2D((float)x, (float)z, 0.0010f);
+    float rare = fbmNoise(x * 0.00018f + 50.0f, z * 0.00018f - 50.0f, 2, 2.0f, 0.5f);
+    float rare01 = (rare + 1.0f) * 0.5f;
+    if(r > 0.72f && weird > 0.62f && rare01 > 0.72f)
+        return BIOME_EXTREME_HILLS;
+
+    if(humid > 0.78f && temp > 0.35f)
+        return BIOME_SWAMP;
+
+    if(temp > 0.70f && humid < 0.32f)
+        return BIOME_DESERT;
+
+    if(temp < 0.28f)
+        return BIOME_TAIGA;
+
+    if(humid > 0.55f)
+        return BIOME_FOREST;
+
+    return BIOME_PLAINS;
+}
+
+// "Near ocean" test for desert water rule
+static bool nearOcean(int x, int z)
+{
+    float o0 = oceanMask((float)x, (float)z);
+    if(o0 < -0.20f) return true;
+
+    const int d = 32;
+    float o1 = oceanMask((float)(x + d), (float)z);
+    float o2 = oceanMask((float)(x - d), (float)z);
+    float o3 = oceanMask((float)x, (float)(z + d));
+    float o4 = oceanMask((float)x, (float)(z - d));
+    return (o1 < -0.25f || o2 < -0.25f || o3 < -0.25f || o4 < -0.25f);
+}
+
+static int getHeight2D(int x, int z, Biome b)
+{
+    float xf = (float)x;
+    float zf = (float)z;
+
+    float macro = fbmNoise(xf * 0.0015f + 3000.0f, zf * 0.0015f - 3000.0f, 5, 2.0f, 0.5f);
+    float base  = fbmNoise(xf * 0.0065f,          zf * 0.0065f,          5, 2.0f, 0.5f);
+    float detail= fbmNoise(xf * 0.020f + 1000.0f, zf * 0.020f - 1000.0f, 4, 2.0f, 0.5f);
+
+    float ridged = ridge2D(xf, zf, 0.0035f);
+    float cliffy = (ridged > 0.72f) ? (ridged - 0.72f) * 18.0f : 0.0f;
+
+    float h = (float)SEA_LEVEL;
+    h += macro  * 18.0f;
+    h += base   * 10.0f;
+    h += detail *  4.0f;
+    h += cliffy;
+
+    float ocean = oceanMask(xf, zf);
+    if(ocean < -0.15f) {
+        float t = smoothstep(-0.35f, -0.15f, ocean);
+        h = mix((float)SEA_LEVEL - 20.0f, h, t);
+    }
+
+    if(b == BIOME_DESERT) h += 2.5f;
+    if(b == BIOME_SWAMP)  h = std::min(h, (float)SEA_LEVEL + 2.0f);
+    if(b == BIOME_FOREST) h += 1.0f;
+
+    h = clampf(h, 4.0f, 90.0f);
+    return (int)std::floor(h);
+}
+
+static int getExtremeHillsBase(int x, int z)
+{
+    float xf = (float)x, zf = (float)z;
+
+    float bigRidge = ridge2D(xf, zf, 0.0010f);
+    float midRidge = ridge2D(xf + 100.0f, zf - 100.0f, 0.0022f);
+
+    float shape = bigRidge * 0.75f + midRidge * 0.25f;
+    float peaks = shape * shape;
+
+    float macro = fbmNoise(xf * 0.0012f + 777.0f, zf * 0.0012f - 777.0f, 4, 2.0f, 0.5f);
+    float noise = fbmNoise(xf * 0.006f, zf * 0.006f, 4, 2.0f, 0.5f);
+
+    float h = (float)SEA_LEVEL + 12.0f;
+    h += peaks * 60.0f;
+    h += macro * 10.0f;
+    h += noise * 5.0f;
+
+    h = clampf(h, (float)SEA_LEVEL + 10.0f, 104.0f);
+    return (int)h;
+}
+
+// Caves/overhang-ish carve using pseudo-3D
+static bool isCaveCarve(int x, int y, int z, int surfaceY)
+{
+    if(y >= surfaceY - 4) return false;
+    if(y <= 4) return false;
+
+    float nx = x * 0.075f;
+    float ny = y * 0.075f;
+    float nz = z * 0.075f;
+
+    float n = fbmNoise3Pseudo(nx, ny, nz, 3, 2.0f, 0.5f);
+    return (n > 0.55f);
+}
+
+// Extreme hills density field (also uses pseudo-3D)
+static bool mountainDensity(int x, int y, int z, int baseSurface)
+{
+    float xf = (float)x;
+    float yf = (float)y;
+    float zf = (float)z;
+
+    float d = (float)(baseSurface - y);
+
+    float over = fbmNoise3Pseudo(xf * 0.035f, yf * 0.040f, zf * 0.035f, 4, 2.0f, 0.5f);
+    float shelves = fbmNoise3Pseudo(xf * 0.020f + 200.0f, yf * 0.030f - 50.0f, zf * 0.020f + 300.0f,
+                                    3, 2.0f, 0.5f);
+
+    float cliff = ridge2D(xf, zf, 0.0024f);
+    float cliffBoost = (cliff > 0.65f) ? (cliff - 0.65f) * 12.0f : 0.0f;
+
+    float density = d + (over * 10.0f) + (shelves * 6.0f) + cliffBoost;
+
+    if(y > baseSurface + 12)
+        density -= (float)(y - (baseSurface + 12)) * 1.2f;
+
+    return density > 0.0f;
+}
+
+// -------------------- SURFACE BLOCKS --------------------
+static BlockType surfaceTopForBiome(Biome b, int surfaceY)
+{
+    if(b == BIOME_DESERT) return BLOCK_SAND;
+    if(b == BIOME_BEACH)  return BLOCK_SAND;
+
+    if(b == BIOME_EXTREME_HILLS) {
+        if(surfaceY >= SEA_LEVEL + 40) return BLOCK_STONE;
+        return BLOCK_GRASS;
+    }
+
+    return BLOCK_GRASS;
+}
+
+static BlockType surfaceFillerForBiome(Biome b, int surfaceY)
+{
+    if(b == BIOME_DESERT) return BLOCK_SAND;
+    if(b == BIOME_BEACH)  return BLOCK_SAND;
+
+    if(b == BIOME_EXTREME_HILLS) {
+        if(surfaceY >= SEA_LEVEL + 40) return BLOCK_STONE;
+        return BLOCK_DIRT;
+    }
+
+    return BLOCK_DIRT;
+}
+
+// -------------------- TREES --------------------
+static bool shouldPlaceTree(Biome b, int x, int z, int surfaceY)
+{
+    if(surfaceY <= SEA_LEVEL + 1) return false;
+
+    // Required: PLAINS + EXTREME_HILLS must spawn trees
+    if(!(b == BIOME_FOREST || b == BIOME_PLAINS || b == BIOME_TAIGA || b == BIOME_EXTREME_HILLS))
+        return false;
+
+    // slope check
+    auto hAt = [&](int ax, int az)->int {
+        if(b == BIOME_EXTREME_HILLS) return getExtremeHillsBase(ax, az);
+        return getHeight2D(ax, az, b);
+    };
+    int hE = hAt(x+2, z);
+    int hW = hAt(x-2, z);
+    int hN = hAt(x, z+2);
+    int hS = hAt(x, z-2);
+    int slope = std::max(std::max(std::abs(hE - hW), std::abs(hN - hS)),
+                         std::max(std::abs(hE - surfaceY), std::abs(hN - surfaceY)));
+
+    int maxSlope = (b == BIOME_EXTREME_HILLS) ? 6 : 4;
+    if(slope >= maxSlope) return false;
+
+    float n = fbmNoise(x * 0.10f, z * 0.10f, 2, 2.0f, 0.5f);
+    float n01 = (n + 1.0f) * 0.5f;
+
+    float thresh = 0.90f;
+    if(b == BIOME_FOREST) thresh = 0.78f;
+    else if(b == BIOME_TAIGA) thresh = 0.84f;
+    else if(b == BIOME_EXTREME_HILLS) thresh = 0.84f;
+    else if(b == BIOME_PLAINS) thresh = 0.88f;
+
+    float macro = fbmNoise(x * 0.02f + 500.0f, z * 0.02f - 500.0f, 2, 2.0f, 0.5f);
+    float macro01 = (macro + 1.0f) * 0.5f;
+    float bonus = 0.0f;
+    if(b == BIOME_PLAINS || b == BIOME_EXTREME_HILLS) bonus = (macro01 - 0.5f) * 0.06f;
+    thresh -= bonus;
+
+    return n01 > thresh;
+}
+
+static void addProceduralTree(std::vector<float> &out, int x, int y, int z)
+{
+    int trunkH = 4 + (std::abs((int)std::floor(perlinNoise(x * 0.3f, z * 0.3f) * 10.0f)) % 2);
+
+    for(int i = 0; i < trunkH; i++)
+        addCube(out, (float)x, (float)(y + i), (float)z, BLOCK_TREE_LOG, true);
+
+    int topY = y + trunkH;
+    for(int dx = -2; dx <= 2; dx++){
+        for(int dz = -2; dz <= 2; dz++){
+            for(int dy = -2; dy <= 2; dy++){
+                int ax = x + dx;
+                int ay = topY + dy;
+                int az = z + dz;
+                int dist = std::abs(dx) + std::abs(dy) + std::abs(dz);
+                if(dist > 5) continue;
+                addCube(out, (float)ax, (float)ay, (float)az, BLOCK_LEAVES, true);
+            }
+        }
+    }
+}
+
+// -------------------- COLLISION / SOLIDITY --------------------
+static bool blockHasCollision(BlockType t) {
+    return (t != BLOCK_WATER);
+}
+
+bool isSolidBlock(int bx, int by, int bz) {
+    auto key = std::make_tuple(bx, by, bz);
+
+    // overrides
+    if(extraBlocks.find(key) != extraBlocks.end()){
+        BlockType t = extraBlocks[key];
+        if((int)t < 0) return false;
+        return blockHasCollision(t);
+    }
+
+    // flowing water set
+    if(waterLevels.find(key) != waterLevels.end())
+        return false;
+
+    Biome b = getBiome(bx, bz);
+    int h = (b == BIOME_EXTREME_HILLS) ? getExtremeHillsBase(bx, bz) : getHeight2D(bx, bz, b);
+    return (by >= 0 && by <= h);
+}
+
+static bool checkCollisionFeet(const Vec3 &feetPos) {
+    float half = playerWidth * 0.5f;
+    float minX = feetPos.x - half, maxX = feetPos.x + half;
+    float minY = feetPos.y,        maxY = feetPos.y + playerHeight;
+    float minZ = feetPos.z - half, maxZ = feetPos.z + half;
+
+    int startX = (int)std::floor(minX), endX = (int)std::floor(maxX);
+    int startY = (int)std::floor(minY), endY = (int)std::floor(maxY);
+    int startZ = (int)std::floor(minZ), endZ = (int)std::floor(maxZ);
+
+    for(int bx = startX; bx <= endX; bx++){
+        for(int by = startY; by <= endY; by++){
+            for(int bz = startZ; bz <= endZ; bz++){
+                if(isSolidBlock(bx, by, bz)){
+                    if(maxX > bx && minX < bx+1 &&
+                       maxY > by && minY < by+1 &&
+                       maxZ > bz && minZ < bz+1)
+                        return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+// -------------------- SPAWN --------------------
+static int surfaceYAt(int x, int z) {
+    Biome b = getBiome(x, z);
+    return (b == BIOME_EXTREME_HILLS) ? getExtremeHillsBase(x, z) : getHeight2D(x, z, b);
+}
+
+static void sanitizeLoadedSpawn(float &x, float &y, float &z) {
+    int tx = (int)std::floor(x);
+    int tz = (int)std::floor(z);
+
+    int surface = surfaceYAt(tx, tz) + 2;
+    if(y < (float)surface) y = (float)surface;
+
+    Vec3 pos = {x, y, z};
+    int lift = 0;
+    while(lift < 256 && checkCollisionFeet(pos)) {
+        pos.y += 1.0f;
+        lift++;
+    }
+    x = pos.x; y = pos.y; z = pos.z;
+}
+
+static void findSafeSpawn(float &outX, float &outY, float &outZ) {
+    const int maxRadius = 128;
+    const int step      = 4;
+
+    int bestX = 0, bestZ = 0;
+    int bestScore = 1000000000;
+
+    for(int r = 0; r <= maxRadius; r += step) {
+        for(int dx = -r; dx <= r; dx += step) {
+            for(int dz = -r; dz <= r; dz += step) {
+                if(std::abs(dx) != r && std::abs(dz) != r) continue;
+
+                int x = dx, z = dz;
+                Biome b = getBiome(x, z);
+                if(b == BIOME_OCEAN) continue;
+
+                int h = surfaceYAt(x, z);
+                int hE = surfaceYAt(x + 4, z);
+                int hW = surfaceYAt(x - 4, z);
+                int hN = surfaceYAt(x, z + 4);
+                int hS = surfaceYAt(x, z - 4);
+                int slope = std::max(std::max(std::abs(hE - hW), std::abs(hN - hS)),
+                                     std::max(std::abs(hE - h),  std::abs(hN - h)));
+
+                int score = slope * 10 + std::abs(h - SEA_LEVEL);
+                if(score >= bestScore) continue;
+
+                Vec3 pos = {(float)x + 0.5f, (float)h + 2.0f, (float)z + 0.5f};
+
+                int lift = 0;
+                while(lift < 256 && checkCollisionFeet(pos)) {
+                    pos.y += 1.0f;
+                    lift++;
+                }
+                if(lift >= 256) continue;
+
+                bestScore = score;
+                bestX = x; bestZ = z;
+            }
+        }
+        if(bestScore <= 15) break;
+    }
+
+    int h = surfaceYAt(bestX, bestZ);
+    outX = (float)bestX + 0.5f;
+    outZ = (float)bestZ + 0.5f;
+    outY = (float)h + 2.0f;
+
+    Vec3 pos = {outX, outY, outZ};
+    int lift = 0;
+    while(lift < 256 && checkCollisionFeet(pos)) {
+        pos.y += 1.0f;
+        lift++;
+    }
+    outY = pos.y;
+}
+
+// -------------------- RAYCAST --------------------
+static bool raycastBlock(const Vec3 &start, const Vec3 &dir, float maxDist, int &outX, int &outY, int &outZ) {
+    float step = 0.1f, traveled = 0.0f;
+    while(traveled < maxDist) {
+        Vec3 pos = add(start, multiply(dir, traveled));
+        int bx = (int)std::floor(pos.x);
+        int by = (int)std::floor(pos.y);
+        int bz = (int)std::floor(pos.z);
+
+        bool solid = false;
+        {
+            std::lock_guard<std::mutex> lk(gWorldMutex);
+            solid = isSolidBlock(bx, by, bz);
+        }
+        if(solid) { outX = bx; outY = by; outZ = bz; return true; }
+        traveled += step;
+    }
+    return false;
+}
+
+// -------------------- WATER FLOW --------------------
+bool canWaterFlowInto(int x, int y, int z) {
+    std::tuple<int,int,int> key = {x, y, z};
+    if(extraBlocks.find(key) != extraBlocks.end())
+        return false;
+
+    int terrainHeight = surfaceYAt(x, z);
+    if(y <= terrainHeight)
+        return false;
+
+    return true;
+}
+
+static void getChunkCoords(int bx, int bz, int &cx, int &cz) {
+    cx = bx / 16; if(bx < 0 && bx % 16 != 0) cx--;
+    cz = bz / 16; if(bz < 0 && bz % 16 != 0) cz--;
+}
+
+static const int NEAR_CHUNK_RADIUS = 2;
+
+static void rebuildChunkAsync(int cx, int cz);
+static void updateWaterFlow(const Camera &camera, float /*dt*/) {
+    int playerChunkX = (int)std::floor(camera.position.x / (float)chunkSize);
+    int playerChunkZ = (int)std::floor(camera.position.z / (float)chunkSize);
+
+    std::vector<std::tuple<int,int,int>> waterKeys;
+    {
+        std::lock_guard<std::mutex> lk(gWorldMutex);
+        waterKeys.reserve(waterLevels.size());
+        for(auto &entry : waterLevels)
+            waterKeys.push_back(entry.first);
+    }
+
+    for(auto key : waterKeys) {
+        int x, y, z;
+        std::tie(x, y, z) = key;
+
+        int cellChunkX = x / 16; if(x < 0 && x % 16 != 0) cellChunkX--;
+        int cellChunkZ = z / 16; if(z < 0 && z % 16 != 0) cellChunkZ--;
+        if (std::abs(cellChunkX - playerChunkX) > NEAR_CHUNK_RADIUS ||
+            std::abs(cellChunkZ - playerChunkZ) > NEAR_CHUNK_RADIUS)
+            continue;
+
+        int level = 0;
+        {
+            std::lock_guard<std::mutex> lk(gWorldMutex);
+            auto it = waterLevels.find(key);
+            if(it == waterLevels.end()) continue;
+            level = it->second;
+        }
+
+        // Down
+        if(y > 0) {
+            bool can = false;
+            {
+                std::lock_guard<std::mutex> lk(gWorldMutex);
+                can = canWaterFlowInto(x, y - 1, z);
+            }
+            if(can) {
+                std::tuple<int,int,int> below = {x, y - 1, z};
+                bool changed = false;
+                {
+                    std::lock_guard<std::mutex> lk(gWorldMutex);
+                    int belowLevel = 0;
+                    auto itB = waterLevels.find(below);
+                    if(itB != waterLevels.end()) belowLevel = itB->second;
+                    if(8 > belowLevel) {
+                        waterLevels[below] = 8;
+                        changed = true;
+                    }
+                }
+                if(changed) {
+                    int cx, cz; getChunkCoords(x, z, cx, cz);
+                    rebuildChunkAsync(cx, cz);
+                }
+            }
+        }
+
+        // Side
+        if(level > 1) {
+            int offsets[4][3] = { {1,0,0}, {-1,0,0}, {0,0,1}, {0,0,-1} };
+            for(int i = 0; i < 4; i++) {
+                int nx = x + offsets[i][0];
+                int ny = y;
+                int nz = z + offsets[i][2];
+
+                bool can = false;
+                {
+                    std::lock_guard<std::mutex> lk(gWorldMutex);
+                    can = canWaterFlowInto(nx, ny, nz);
+                }
+                if(!can) continue;
+
+                std::tuple<int,int,int> neighbor = {nx, ny, nz};
+                bool changed = false;
+                {
+                    std::lock_guard<std::mutex> lk(gWorldMutex);
+                    int neighborLevel = 0;
+                    auto itN = waterLevels.find(neighbor);
+                    if(itN != waterLevels.end()) neighborLevel = itN->second;
+                    int newLevel = level - 1;
+                    if(newLevel > neighborLevel && newLevel > 1) {
+                        waterLevels[neighbor] = newLevel;
+                        changed = true;
+                    }
+                }
+                if(changed) {
+                    int cx, cz; getChunkCoords(nx, nz, cx, cz);
+                    rebuildChunkAsync(cx, cz);
+                }
+            }
+        }
+    }
+}
+
+// -------------------- CPU CHUNK BUILD --------------------
+static BlockType overrideAtLocked(int x, int y, int z, bool &hasOverride, bool &carved)
+{
+    auto key = std::make_tuple(x, y, z);
+    auto it = extraBlocks.find(key);
+    if(it == extraBlocks.end()) {
+        hasOverride = false;
+        carved = false;
+        return BLOCK_NONE;
+    }
+    hasOverride = true;
+    carved = ((int)it->second < 0);
+    return it->second;
+}
+
+static bool waterAtLocked(int x, int y, int z)
+{
+    auto key = std::make_tuple(x, y, z);
+    return (waterLevels.find(key) != waterLevels.end());
+}
+
+static void buildChunkVerticesCPU(int cx, int cz, std::vector<float> &outVerts)
+{
+    outVerts.clear();
+    outVerts.reserve(16 * 16 * 36 * 5);
+
+    for(int lx = 0; lx < 16; lx++){
+        for(int lz = 0; lz < 16; lz++){
+            int wx = cx * 16 + lx;
+            int wz = cz * 16 + lz;
+
+            Biome b = getBiome(wx, wz);
+
+            int surfaceY = (b == BIOME_EXTREME_HILLS)
+                ? getExtremeHillsBase(wx, wz)
+                : getHeight2D(wx, wz, b);
+
+            // beaches
+            if(b != BIOME_DESERT && b != BIOME_EXTREME_HILLS) {
+                if(surfaceY <= SEA_LEVEL + 2 && surfaceY >= SEA_LEVEL - 2)
+                    b = BIOME_BEACH;
+            }
+
+            int yMin = MIN_WORLD_Y;
+            int yMax = std::min(MAX_WORLD_Y, (b == BIOME_EXTREME_HILLS) ? (surfaceY + 20) : (surfaceY + 1));
+
+            for(int y = yMin; y <= yMax; y++){
+                bool hasOverride=false, carved=false, hasWater=false;
+
+                BlockType ov = BLOCK_NONE;
+                {
+                    std::lock_guard<std::mutex> lk(gWorldMutex);
+                    ov = overrideAtLocked(wx, y, wz, hasOverride, carved);
+                    hasWater = waterAtLocked(wx, y, wz);
+                }
+
+                if(hasOverride) {
+                    if(carved) continue;
+                    addCube(outVerts, (float)wx, (float)y, (float)wz, ov, true);
+                    continue;
+                }
+                if(hasWater) continue;
+
+                bool solid = false;
+
+                if(b == BIOME_EXTREME_HILLS) {
+                    solid = mountainDensity(wx, y, wz, surfaceY);
+                    if(solid && isCaveCarve(wx, y, wz, surfaceY))
+                        solid = false;
+                } else {
+                    if(y <= surfaceY) {
+                        solid = true;
+                        if(isCaveCarve(wx, y, wz, surfaceY))
+                            solid = false;
+                    }
+                }
+
+                if(!solid) continue;
+
+                BlockType bt = BLOCK_STONE;
+
+                if(y == 0) bt = BLOCK_BEDROCK;
+                else if(y < 3) bt = BLOCK_STONE;
+                else {
+                    int depth = surfaceY - y;
+                    if(depth == 0) bt = surfaceTopForBiome(b, surfaceY);
+                    else if(depth < 4) bt = surfaceFillerForBiome(b, surfaceY);
+                    else bt = BLOCK_STONE;
+                }
+
+                addCube(outVerts, (float)wx, (float)y, (float)wz, bt, true);
+            }
+
+            // ---- WATER FILL RULES ----
+            // Desert: NO inland water; only if near ocean.
+            bool allowWaterFill = true;
+            if(b == BIOME_DESERT && !nearOcean(wx, wz)) allowWaterFill = false;
+
+            if(allowWaterFill) {
+                if(b == BIOME_OCEAN || b == BIOME_SWAMP || surfaceY < SEA_LEVEL) {
+                    for(int y = surfaceY + 1; y <= SEA_LEVEL; y++) {
+                        bool hasOverride=false, carved=false, hasWater=false;
+                        {
+                            std::lock_guard<std::mutex> lk(gWorldMutex);
+                            (void)overrideAtLocked(wx, y, wz, hasOverride, carved);
+                            hasWater = waterAtLocked(wx, y, wz);
+                        }
+                        if(hasOverride || hasWater) continue;
+                        addCube(outVerts, (float)wx, (float)y, (float)wz, BLOCK_WATER, true);
+                    }
+                }
+            }
+
+            // ---- TREES ----
+            if(shouldPlaceTree(b, wx, wz, surfaceY)) {
+                bool hasOverride=false, carved=false;
+                {
+                    std::lock_guard<std::mutex> lk(gWorldMutex);
+                    (void)overrideAtLocked(wx, surfaceY + 1, wz, hasOverride, carved);
+                }
+                if(!hasOverride) {
+                    addProceduralTree(outVerts, wx, surfaceY + 1, wz);
+                }
+            }
+        }
+    }
+
+    // Explicit water cells (flow system)
+    std::vector<std::tuple<int,int,int>> wl;
+    {
+        std::lock_guard<std::mutex> lk(gWorldMutex);
+        wl.reserve(waterLevels.size());
+        for(auto &kv : waterLevels) wl.push_back(kv.first);
+    }
+    for(auto &k : wl) {
+        int bx = std::get<0>(k);
+        int by = std::get<1>(k);
+        int bz = std::get<2>(k);
+        int ccx, ccz;
+        getChunkCoords(bx, bz, ccx, ccz);
+        if(ccx == cx && ccz == cz) {
+            addCube(outVerts, (float)bx, (float)by, (float)bz, BLOCK_WATER, true);
+        }
+    }
+}
+
+// -------------------- WORKER THREAD --------------------
+static void chunkWorkerThread() {
+    while(gWorkerRunning.load()) {
+        ChunkJob job;
+        {
+            std::unique_lock<std::mutex> lk(gJobMutex);
+            gJobCV.wait(lk, []{ return !gWorkerRunning.load() || !gJobQueue.empty(); });
+            if(!gWorkerRunning.load()) break;
+            job = gJobQueue.front();
+            gJobQueue.pop();
+        }
+
+        ChunkResult res;
+        res.cx = job.cx;
+        res.cz = job.cz;
+        res.rebuild = job.rebuild;
+        buildChunkVerticesCPU(job.cx, job.cz, res.verts);
+
+        {
+            std::lock_guard<std::mutex> lk(gDoneMutex);
+            gDoneQueue.push(std::move(res));
+        }
+    }
+}
+
+// -------------------- MAIN THREAD UPLOAD --------------------
+static void uploadChunkToGPU(int cx, int cz, const std::vector<float> &verts, bool rebuild) {
+    std::pair<int,int> key = {cx, cz};
+
+    if(rebuild) {
+        auto it = chunks.find(key);
+        if(it != chunks.end()) {
+            Chunk &chunk = it->second;
+            chunk.vertices = verts;
+            glBindVertexArray(chunk.VAO);
+            glBindBuffer(GL_ARRAY_BUFFER, chunk.VBO);
+            glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
+            glEnableVertexAttribArray(0);
+            glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
+            glEnableVertexAttribArray(1);
+            glBindVertexArray(0);
+            return;
+        }
+    }
+
+    Chunk chunk;
+    chunk.chunkX = cx;
+    chunk.chunkZ = cz;
+    chunk.vertices = verts;
+
+    glGenVertexArrays(1, &chunk.VAO);
+    glGenBuffers(1, &chunk.VBO);
+
+    glBindVertexArray(chunk.VAO);
+    glBindBuffer(GL_ARRAY_BUFFER, chunk.VBO);
+    glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+    glBindVertexArray(0);
+
+    chunks[key] = chunk;
+}
+
+static void requestChunkAsync(int cx, int cz) {
+    std::pair<int,int> key = {cx, cz};
+    if(chunks.find(key) != chunks.end()) return;
+
+    long long packed = packChunkKey(cx, cz);
+    {
+        std::lock_guard<std::mutex> lk(gRequestedMutex);
+        if(gRequested.find(packed) != gRequested.end())
+            return;
+        gRequested.insert(packed);
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(gJobMutex);
+        gJobQueue.push({cx, cz, false});
+    }
+    gJobCV.notify_one();
+}
+
+static void rebuildChunkAsync(int cx, int cz) {
+    std::pair<int,int> key = {cx, cz};
+    if(chunks.find(key) == chunks.end()) return;
+    {
+        std::lock_guard<std::mutex> lk(gJobMutex);
+        gJobQueue.push({cx, cz, true});
+    }
+    gJobCV.notify_one();
+}
+
+// -------------------- RENDER --------------------
+static void renderChunks(const Mat4 &view, const Mat4 &proj, const Vec3 &viewPos) {
+    glUseProgram(worldShader);
+
+    Mat4 VP = multiplyMatrix(proj, view);
+    glUniformMatrix4fv(glGetUniformLocation(worldShader, "MVP"), 1, GL_FALSE, VP.m);
+    glUniform1i(glGetUniformLocation(worldShader, "ourTexture"), 0);
+    glUniform3f(glGetUniformLocation(worldShader, "sunDirection"), -0.3f, 1.0f, -0.2f);
+    glUniform3f(glGetUniformLocation(worldShader, "viewPos"), viewPos.x, viewPos.y, viewPos.z);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, texID);
+
+    for(auto &entry : chunks) {
+        Chunk &chunk = entry.second;
+        if(chunk.vertices.empty()) continue;
+        glBindVertexArray(chunk.VAO);
+        glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(chunk.vertices.size() / 5));
+    }
+    glBindVertexArray(0);
+}
+
+// -------------------- DEV OVERLAY --------------------
+static std::string fmtFloat1(float v) {
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(1) << v;
+    return ss.str();
+}
+
+static void drawDevOverlay(bool show, const Vec3 &playerFeet) {
+    if(!show) return;
+
+    // Convert top-left desired position to our bottom-left UI coords:
+    // top margin of 10px, line height ~ 12*scale
+    float scale = 2.0f;
+    float left = 10.0f;
+    float top = (float)SCREEN_HEIGHT - 10.0f;
+
+    // draw semi-transparent backing
+    float panelW = 380.0f;
+    float panelH = 4.0f * (10.0f * scale) + 12.0f;
+    uiDrawRect(left - 6.0f, top - panelH + 6.0f, panelW, panelH, 0.0f, 0.0f, 0.0f, 0.35f);
+
+    int bx = (int)std::floor(playerFeet.x);
+    int bz = (int)std::floor(playerFeet.z);
+    Biome b = getBiome(bx, bz);
+
+    std::string line1 = "C-CRAFT";
+    std::string line2 = "XYZ: " + fmtFloat1(playerFeet.x) + " " + fmtFloat1(playerFeet.y) + " " + fmtFloat1(playerFeet.z);
+    std::string line3 = std::string("BIOME: ") + biomeToString(b);
+    std::string line4 = "VERSION PLACEHOLDER";
+
+    // Our uiDrawText expects bottom-left y
+    float lineY = top - (10.0f * scale);
+
+    uiDrawText(left, lineY, line1, scale, 1,1,1,1, true);
+    lineY -= (10.0f * scale);
+    uiDrawText(left, lineY, line2, scale, 1,1,1,1, true);
+    lineY -= (10.0f * scale);
+    uiDrawText(left, lineY, line3, scale, 1,1,1,1, true);
+    lineY -= (10.0f * scale);
+    uiDrawText(left, lineY, line4, scale, 1,1,1,1, true);
+}
+
+// -------------------- MAIN --------------------
+int main(int, char**) {
     float loadedX = 0.0f, loadedY = 30.0f, loadedZ = 0.0f;
     int loadedSeed = 0;
 
-    bool loadedOk = loadWorld("saved_world.txt", loadedSeed, loadedX, loadedY, loadedZ);
+    bool loadedOk = false;
+    {
+        std::lock_guard<std::mutex> lk(gWorldMutex);
+        loadedOk = loadWorld("saved_world.txt", loadedSeed, loadedX, loadedY, loadedZ);
+    }
+
     if(loadedOk) {
         std::cout << "[World] Loaded seed=" << loadedSeed
-                  << " playerFeet(" << loadedX << "," << loadedY << "," << loadedZ << ")\n";
+                  << " feet(" << loadedX << "," << loadedY << "," << loadedZ << ")\n";
         sanitizeLoadedSpawn(loadedX, loadedY, loadedZ);
     } else {
         unsigned int rseed = (unsigned int)time(nullptr);
@@ -969,7 +1212,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
     }
 
     if(SDL_Init(SDL_INIT_VIDEO) < 0) {
-        std::cerr << "SDL_Init Error: " << SDL_GetError() << std::endl;
+        std::cerr << "SDL_Init Error: " << SDL_GetError() << "\n";
         return -1;
     }
 
@@ -978,30 +1221,28 @@ int main(int /*argc*/, char* /*argv*/[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
 
     SDL_Window* window = SDL_CreateWindow("Voxel Engine",
-                                          SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                          SCREEN_WIDTH, SCREEN_HEIGHT,
-                                          SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN);
+        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+        SCREEN_WIDTH, SCREEN_HEIGHT,
+        SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN);
+
     if(!window) {
-        std::cerr << "SDL_CreateWindow Error: " << SDL_GetError() << std::endl;
+        std::cerr << "SDL_CreateWindow Error: " << SDL_GetError() << "\n";
         SDL_Quit();
         return -1;
     }
 
     SDL_GLContext glContext = SDL_GL_CreateContext(window);
     if(!glContext) {
-        std::cerr << "SDL_GL_CreateContext Error: " << SDL_GetError() << std::endl;
+        std::cerr << "SDL_GL_CreateContext Error: " << SDL_GetError() << "\n";
         SDL_DestroyWindow(window);
         SDL_Quit();
         return -1;
     }
 
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
     glewExperimental = GL_TRUE;
     GLenum glewErr = glewInit();
     if(glewErr != GLEW_OK) {
-        std::cerr << "GLEW Error: " << glewGetErrorString(glewErr) << std::endl;
+        std::cerr << "GLEW Error: " << glewGetErrorString(glewErr) << "\n";
         SDL_GL_DeleteContext(glContext);
         SDL_DestroyWindow(window);
         SDL_Quit();
@@ -1010,9 +1251,10 @@ int main(int /*argc*/, char* /*argv*/[]) {
 
     SDL_GL_SetSwapInterval(1);
     glEnable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     worldShader = createShaderProgram(worldVertSrc, worldFragSrc);
-
     texID = loadTexture("texture.png");
     if(!texID) {
         std::cerr << "Texture failed to load!\n";
@@ -1034,10 +1276,8 @@ int main(int /*argc*/, char* /*argv*/[]) {
     initUI();
     Inventory inventory;
 
-    // Start worker
     std::thread worker(chunkWorkerThread);
 
-    // Player FEET (collision base)
     Vec3 playerFeet = {loadedX, loadedY, loadedZ};
 
     Camera camera;
@@ -1047,12 +1287,13 @@ int main(int /*argc*/, char* /*argv*/[]) {
 
     bool paused = false;
     bool isFlying = false;
+    bool showDevOverlay = false; // <-- F3 toggles this
     float verticalVelocity = 0.0f;
     float tickAccumulator = 0.0f;
 
-    // Initial chunk requests (async, no stutter)
     int spawnChunkX = (int)std::floor(playerFeet.x / (float)chunkSize);
     int spawnChunkZ = (int)std::floor(playerFeet.z / (float)chunkSize);
+
     for(int cx = spawnChunkX - renderDistance; cx <= spawnChunkX + renderDistance; cx++){
         for(int cz = spawnChunkZ - renderDistance; cz <= spawnChunkZ + renderDistance; cz++){
             requestChunkAsync(cx, cz);
@@ -1066,18 +1307,17 @@ int main(int /*argc*/, char* /*argv*/[]) {
     SDL_Event ev;
 
     Mat4 projWorld = perspectiveMatrix(45.0f*(3.14159f/180.0f),
-                                       (float)SCREEN_WIDTH/(float)SCREEN_HEIGHT,
-                                       0.1f, 100.0f);
+        (float)SCREEN_WIDTH/(float)SCREEN_HEIGHT,
+        0.1f, 140.0f);
 
     while(running) {
         Uint32 now = SDL_GetTicks();
         float dt = (now - lastTime) * 0.001f;
         lastTime = now;
 
-        // Update camera from feet (2 blocks high)
         camera.position = {playerFeet.x, playerFeet.y + EYE_HEIGHT, playerFeet.z};
 
-        // Process finished chunks with a strict budget to prevent stutter.
+        // Upload a couple chunks per frame to reduce stutter
         int uploadsThisFrame = 0;
         while(uploadsThisFrame < MAX_CHUNK_UPLOADS_PER_FRAME) {
             ChunkResult res;
@@ -1094,15 +1334,14 @@ int main(int /*argc*/, char* /*argv*/[]) {
 
             uploadChunkToGPU(res.cx, res.cz, res.verts, res.rebuild);
 
-            // allow re-request if needed later (only for first-time requests)
             if(!res.rebuild) {
                 std::lock_guard<std::mutex> lk(gRequestedMutex);
                 gRequested.erase(packChunkKey(res.cx, res.cz));
             }
-
             uploadsThisFrame++;
         }
 
+        // Water tick
         tickAccumulator += dt;
         while(tickAccumulator >= TICK_INTERVAL) {
             tickAccumulator -= TICK_INTERVAL;
@@ -1110,11 +1349,13 @@ int main(int /*argc*/, char* /*argv*/[]) {
         }
 
         while(SDL_PollEvent(&ev)) {
-            if(ev.type == SDL_QUIT)
-                running = false;
+            if(ev.type == SDL_QUIT) running = false;
 
             if(ev.type == SDL_KEYDOWN) {
-                if(ev.key.keysym.sym == SDLK_ESCAPE) {
+                if(ev.key.keysym.sym == SDLK_F3) {
+                    showDevOverlay = !showDevOverlay; // <-- toggle overlay
+                }
+                else if(ev.key.keysym.sym == SDLK_ESCAPE) {
                     if(inventory.isOpen()) inventory.toggle();
                     paused = !paused;
                     SDL_SetRelativeMouseMode(paused ? SDL_FALSE : SDL_TRUE);
@@ -1123,12 +1364,10 @@ int main(int /*argc*/, char* /*argv*/[]) {
                     inventory.toggle();
                     SDL_SetRelativeMouseMode(inventory.isOpen() ? SDL_FALSE : SDL_TRUE);
                 }
-                else if(!paused && !inventory.isOpen() && !isFlying &&
-                        ev.key.keysym.sym == SDLK_SPACE) {
+                else if(!paused && !inventory.isOpen() && !isFlying && ev.key.keysym.sym == SDLK_SPACE) {
                     Vec3 testFeet = playerFeet;
                     testFeet.y -= 0.05f;
-                    if(checkCollisionFeet(testFeet))
-                        verticalVelocity = JUMP_SPEED;
+                    if(checkCollisionFeet(testFeet)) verticalVelocity = JUMP_SPEED;
                 }
                 else if(ev.key.keysym.sym == SDLK_f) {
                     isFlying = !isFlying;
@@ -1141,11 +1380,11 @@ int main(int /*argc*/, char* /*argv*/[]) {
                     float sensitivity = 0.0025f;
                     camera.yaw   += ev.motion.xrel * sensitivity;
                     camera.pitch -= ev.motion.yrel * sensitivity;
-                    if(camera.pitch > 1.5f)  camera.pitch = 1.5f;
-                    if(camera.pitch < -1.5f) camera.pitch = -1.5f;
+                    camera.pitch = clampf(camera.pitch, -1.5f, 1.5f);
                 }
             }
 
+            // block breaking/placing
             if(!paused && !inventory.isOpen() && ev.type == SDL_MOUSEBUTTONDOWN) {
                 Vec3 forward = {
                     cosf(camera.pitch) * cosf(camera.yaw),
@@ -1158,12 +1397,9 @@ int main(int /*argc*/, char* /*argv*/[]) {
                     continue;
 
                 if(ev.button.button == SDL_BUTTON_LEFT) {
-                    // Break: carve out override
-                    std::tuple<int,int,int> key = {bx, by, bz};
-                    extraBlocks[key] = (BlockType)-1;
-
-                    int ccx, ccz;
-                    getChunkCoords(bx, bz, ccx, ccz);
+                    std::lock_guard<std::mutex> lk(gWorldMutex);
+                    extraBlocks[{bx, by, bz}] = (BlockType)-1;
+                    int ccx, ccz; getChunkCoords(bx, bz, ccx, ccz);
                     rebuildChunkAsync(ccx, ccz);
                 }
                 else if(ev.button.button == SDL_BUTTON_RIGHT) {
@@ -1177,8 +1413,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
                     else pz += (diff.z > 0) ? -1 : 1;
 
                     int blockToPlace = inventory.getSelectedBlock();
-                    if(blockToPlace != BLOCK_NONE) {
-                        // Don’t place inside PLAYER (feet capsule)
+                    if(blockToPlace != (int)BLOCK_NONE) {
                         Vec3 pos = playerFeet;
                         float half = playerWidth * 0.5f;
                         float minX = pos.x - half, maxX = pos.x + half;
@@ -1189,28 +1424,14 @@ int main(int /*argc*/, char* /*argv*/[]) {
                              py + 1 > minY && py < maxY &&
                              pz + 1 > minZ && pz < maxZ)) {
 
-                            std::tuple<int,int,int> pKey = {px, py, pz};
-                            extraBlocks[pKey] = (BlockType)blockToPlace;
-
-                            int ccx, ccz;
-                            getChunkCoords(px, pz, ccx, ccz);
+                            std::lock_guard<std::mutex> lk(gWorldMutex);
+                            extraBlocks[{px, py, pz}] = (BlockType)blockToPlace;
+                            int ccx, ccz; getChunkCoords(px, pz, ccx, ccz);
                             rebuildChunkAsync(ccx, ccz);
                         }
                     }
                 }
             }
-        }
-
-        if(paused) {
-            int menuResult = drawPauseMenu(SCREEN_WIDTH, SCREEN_HEIGHT);
-            if(menuResult == 1) {
-                paused = false;
-                SDL_SetRelativeMouseMode(SDL_TRUE);
-            } else if(menuResult == 2) {
-                running = false;
-            }
-            SDL_GL_SwapWindow(window);
-            continue;
         }
 
         // Movement
@@ -1242,15 +1463,12 @@ int main(int /*argc*/, char* /*argv*/[]) {
 
         Vec3 newFeet = playerFeet;
 
-        // Horizontal move X
         newFeet.x += move.x * speed * dt;
         if(checkCollisionFeet(newFeet)) newFeet.x = playerFeet.x;
 
-        // Horizontal move Z
         newFeet.z += move.z * speed * dt;
         if(checkCollisionFeet(newFeet)) newFeet.z = playerFeet.z;
 
-        // Vertical
         if(isFlying) {
             if(!inventory.isOpen()){
                 if(keys[SDL_SCANCODE_SPACE]) newFeet.y += speed * dt;
@@ -1259,7 +1477,6 @@ int main(int /*argc*/, char* /*argv*/[]) {
             verticalVelocity = 0.0f;
         } else {
             verticalVelocity += GRAVITY * dt;
-
             float targetY = newFeet.y + verticalVelocity * dt;
             float startY  = newFeet.y;
             float stepY   = (targetY > startY) ? 0.05f : -0.05f;
@@ -1273,10 +1490,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
                 Vec3 testPos = newFeet;
                 testPos.y = nextY;
 
-                if(checkCollisionFeet(testPos)) {
-                    verticalVelocity = 0.0f;
-                    break;
-                }
+                if(checkCollisionFeet(testPos)) { verticalVelocity = 0.0f; break; }
                 y = nextY;
             }
             newFeet.y = y;
@@ -1290,8 +1504,9 @@ int main(int /*argc*/, char* /*argv*/[]) {
         }
 
         playerFeet = newFeet;
+        camera.position = {playerFeet.x, playerFeet.y + EYE_HEIGHT, playerFeet.z};
 
-        // Load chunks around player (async)
+        // Request chunks around player
         int pcx = (int)std::floor(playerFeet.x / (float)chunkSize);
         int pcz = (int)std::floor(playerFeet.z / (float)chunkSize);
         for(int cx = pcx - renderDistance; cx <= pcx + renderDistance; cx++){
@@ -1300,7 +1515,6 @@ int main(int /*argc*/, char* /*argv*/[]) {
             }
         }
 
-        // Update inventory logic
         inventory.update(dt, camera);
 
         // Render
@@ -1308,47 +1522,35 @@ int main(int /*argc*/, char* /*argv*/[]) {
         glClearColor(0.55f,0.75f,1.0f,1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        Mat4 view = lookAtMatrix(camera.position,
-                                 add(camera.position, forward),
-                                 {0,1,0});
-
+        Mat4 view = lookAtMatrix(camera.position, add(camera.position, forward), {0,1,0});
         renderChunks(view, projWorld, camera.position);
 
-        // UI
-        drawFlyIndicator(isFlying, SCREEN_WIDTH, SCREEN_HEIGHT);
-
-        if(inventory.isOpen()){
-            inventory.render();
-            if(inventory.getSelectedBlock() != BLOCK_NONE) {
-                glDisable(GL_DEPTH_TEST);
-                renderHeldBlock3D(projWorld, inventory.getSelectedBlock());
-                glEnable(GL_DEPTH_TEST);
-            } else {
-                glDisable(GL_DEPTH_TEST);
-                renderHandRect(projWorld);
-                glEnable(GL_DEPTH_TEST);
-            }
-        }
+        // Dev overlay (F3)
+        glDisable(GL_DEPTH_TEST);
+        drawDevOverlay(showDevOverlay, playerFeet);
+        glEnable(GL_DEPTH_TEST);
 
         SDL_GL_SwapWindow(window);
     }
 
-    // Save FEET position (not eye)
-    saveWorld("saved_world.txt", loadedSeed,
-              playerFeet.x, playerFeet.y, playerFeet.z);
+    // Save
+    {
+        std::lock_guard<std::mutex> lk(gWorldMutex);
+        saveWorld("saved_world.txt", loadedSeed, playerFeet.x, playerFeet.y, playerFeet.z);
+    }
 
-    // Stop worker
+    // Shutdown worker
     gWorkerRunning.store(false);
     gJobCV.notify_all();
-    if(worker.joinable())
-        worker.join();
+    if(worker.joinable()) worker.join();
 
+    // Cleanup
     glDeleteProgram(worldShader);
     glDeleteProgram(uiShader);
     glDeleteVertexArrays(1, &uiVAO);
     glDeleteBuffers(1, &uiVBO);
 
-    for(auto &kv : chunks){
+    for(auto &kv : chunks) {
         glDeleteVertexArrays(1, &kv.second.VAO);
         glDeleteBuffers(1, &kv.second.VBO);
     }
