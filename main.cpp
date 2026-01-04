@@ -67,8 +67,9 @@ static const float TICK_INTERVAL = 0.5f;
 
 // Player physics
 static const float playerWidth  = 0.6f;
-static const float playerHeight = 2.0f;
-static const float EYE_HEIGHT   = 2.0f; // camera is 2 blocks above feet
+static const float playerHeight = 1.8f;     // FIX: 1.8 blocks
+static const float EYE_HEIGHT   = 1.62f;    // FIX: Minecraft-like eye height
+
 static const float WORLD_FLOOR_LIMIT = -10.0f;
 static const float GRAVITY = -9.81f;
 static const float JUMP_SPEED = 5.0f;
@@ -290,7 +291,6 @@ static void initUI() {
     glGenVertexArrays(1, &uiTexVAO);
     glGenBuffers(1, &uiTexVBO);
 
-    // Clip-space quad with UVs
     float quad[] = {
         // pos      // uv
         -1.f, -1.f,  0.f, 0.f,
@@ -501,7 +501,7 @@ static bool nearOcean(int x, int z)
     float o1 = oceanMask((float)(x + d), (float)z);
     float o2 = oceanMask((float)(x - d), (float)z);
     float o3 = oceanMask((float)x, (float)(z + d));
-    float o4 = oceanMask((float)x, (float)(z - d));
+    float o4 = oceanMask((float)(x), (float)(z - d));
     return (o1 < -0.25f || o2 < -0.25f || o3 < -0.25f || o4 < -0.25f);
 }
 
@@ -623,11 +623,19 @@ static BlockType surfaceFillerForBiome(Biome b, int surfaceY)
 }
 
 // -------------------- TREES --------------------
+static int treeTrunkHeightDet(int x, int z) {
+    int trunkH = 4 + (std::abs((int)std::floor(perlinNoise(x * 0.3f, z * 0.3f) * 10.0f)) % 2);
+    return trunkH;
+}
+
+static bool isTreeBlock(BlockType t) {
+    return (t == BLOCK_TREE_LOG || t == BLOCK_LEAVES);
+}
+
 static bool shouldPlaceTree(Biome b, int x, int z, int surfaceY)
 {
     if(surfaceY <= SEA_LEVEL + 1) return false;
 
-    // Required: plains + extreme hills must spawn trees
     if(!(b == BIOME_FOREST || b == BIOME_PLAINS || b == BIOME_TAIGA || b == BIOME_EXTREME_HILLS))
         return false;
 
@@ -652,31 +660,87 @@ static bool shouldPlaceTree(Biome b, int x, int z, int surfaceY)
     if(b == BIOME_FOREST) thresh = 0.78f;
     else if(b == BIOME_TAIGA) thresh = 0.84f;
     else if(b == BIOME_EXTREME_HILLS) thresh = 0.84f;
-    else if(b == BIOME_PLAINS) thresh = 0.83f; // boosted plains
+    else if(b == BIOME_PLAINS) thresh = 0.83f;
 
     uint32_t h = hash2i(x, z);
-    bool sprinkle = ((h & 127u) == 0u); // ~1/128
+    bool sprinkle = ((h & 127u) == 0u);
 
     return (n01 > thresh) || sprinkle;
 }
 
-static void addProceduralTree(std::vector<float> &out, int x, int y, int z)
-{
-    int trunkH = 4 + (std::abs((int)std::floor(perlinNoise(x * 0.3f, z * 0.3f) * 10.0f)) % 2);
-
-    for(int i = 0; i < trunkH; i++)
-        addCube(out, (float)x, (float)(y + i), (float)z, BLOCK_TREE_LOG, true);
-
+static void ensureTreeBlocksInOverrides(int x, int y, int z) {
+    int trunkH = treeTrunkHeightDet(x, z);
     int topY = y + trunkH;
-    for(int dx = -2; dx <= 2; dx++){
-        for(int dz = -2; dz <= 2; dz++){
-            for(int dy = -2; dy <= 2; dy++){
+
+    auto maybeSet = [&](int bx, int by, int bz, BlockType t){
+        std::tuple<int,int,int> k = {bx, by, bz};
+
+        if(extraBlocks.find(k) != extraBlocks.end())
+            return;
+        if(waterLevels.find(k) != waterLevels.end())
+            return;
+
+        extraBlocks[k] = t;
+    };
+
+    for(int i=0;i<trunkH;i++){
+        maybeSet(x, y+i, z, BLOCK_TREE_LOG);
+    }
+
+    for(int dx=-2;dx<=2;dx++){
+        for(int dz=-2;dz<=2;dz++){
+            for(int dy=-2;dy<=2;dy++){
                 int ax = x + dx;
                 int ay = topY + dy;
                 int az = z + dz;
                 int dist = std::abs(dx) + std::abs(dy) + std::abs(dz);
                 if(dist > 5) continue;
-                addCube(out, (float)ax, (float)ay, (float)az, BLOCK_LEAVES, true);
+                maybeSet(ax, ay, az, BLOCK_LEAVES);
+            }
+        }
+    }
+}
+
+static void addTreeFromOverrides(std::vector<float> &out, int x, int y, int z) {
+    int trunkH = treeTrunkHeightDet(x, z);
+    int topY = y + trunkH;
+
+    auto addIfPresent = [&](int bx, int by, int bz, BlockType fallback){
+        bool hasOverride=false, carved=false;
+        BlockType ov = BLOCK_NONE;
+        {
+            std::lock_guard<std::mutex> lk(gWorldMutex);
+            auto key = std::make_tuple(bx, by, bz);
+            auto it = extraBlocks.find(key);
+            if(it != extraBlocks.end()){
+                hasOverride = true;
+                ov = it->second;
+                carved = ((int)ov < 0);
+            } else {
+                hasOverride = false;
+            }
+        }
+        if(hasOverride) {
+            if(carved) return;
+            addCube(out, (float)bx, (float)by, (float)bz, ov, true);
+        } else {
+            addCube(out, (float)bx, (float)by, (float)bz, fallback, true);
+        }
+    };
+
+    for(int i=0;i<trunkH;i++){
+        addIfPresent(x, y+i, z, BLOCK_TREE_LOG);
+    }
+
+    for(int dx=-2;dx<=2;dx++){
+        for(int dz=-2;dz<=2;dz++){
+            for(int dy=-2;dy<=2;dy++){
+                int ax = x + dx;
+                int ay = topY + dy;
+                int az = z + dz;
+                int dist = std::abs(dx) + std::abs(dy) + std::abs(dz);
+                if(dist > 5) continue;
+                addIfPresent(ax, ay, az, BLOCK_LEAVES);
             }
         }
     }
@@ -1060,13 +1124,37 @@ static void buildChunkVerticesCPU(int cx, int cz, std::vector<float> &outVerts)
             bool surfaceIsGrass = (top == BLOCK_GRASS);
 
             if(surfaceIsGrass && shouldPlaceTree(b, wx, wz, surfaceY)) {
-                bool hasOverride=false, carved=false;
+                // FIX: do NOT treat the tree's own overrides as "blocked" on rebuild.
+                // Only block if trunk-base is carved (-1) OR replaced by a non-tree block.
+                bool allowTree = true;
+
                 {
                     std::lock_guard<std::mutex> lk(gWorldMutex);
-                    (void)overrideAtLocked(wx, surfaceY + 1, wz, hasOverride, carved);
+                    auto kBase = std::make_tuple(wx, surfaceY + 1, wz);
+                    auto it = extraBlocks.find(kBase);
+                    if(it != extraBlocks.end()) {
+                        BlockType t = it->second;
+
+                        // player broke trunk-base => tree stays gone
+                        if((int)t < 0) {
+                            allowTree = false;
+                        }
+                        // if player placed something else here, don't spawn a tree into it
+                        else if(!isTreeBlock(t)) {
+                            allowTree = false;
+                        }
+                        // else: it's a tree block (log/leaves) => this IS the tree data, keep it
+                    }
                 }
-                if(!hasOverride) {
-                    addProceduralTree(outVerts, wx, surfaceY + 1, wz);
+
+                if(allowTree) {
+                    // Ensure deterministic tree blocks exist, but never overwrite carved (-1) entries.
+                    {
+                        std::lock_guard<std::mutex> lk(gWorldMutex);
+                        ensureTreeBlocksInOverrides(wx, surfaceY + 1, wz);
+                    }
+                    // Render from overrides so broken logs/leaves stay gone after rebuilds.
+                    addTreeFromOverrides(outVerts, wx, surfaceY + 1, wz);
                 }
             }
         }
@@ -1304,7 +1392,6 @@ static void drawLoadingScreen(float progress01) {
     float tw = (float)title.size() * 6.0f * scale;
     uiDrawText(px + (panelW - tw) * 0.5f, py + panelH - 50.0f, title, scale, 1,1,1,1, true);
 
-    // Progress bar
     float barX = px + 40.0f;
     float barY = py + 45.0f;
     float barW = panelW - 80.0f;
@@ -1346,11 +1433,9 @@ static void clearAsyncQueues() {
 }
 
 static void resetWorldData(bool wipeSaveFile) {
-    // Stop any pending async work and clear GPU chunks
     clearAsyncQueues();
     clearChunkGPU();
 
-    // Clear world override maps
     {
         std::lock_guard<std::mutex> lk(gWorldMutex);
         extraBlocks.clear();
@@ -1426,7 +1511,6 @@ int main(int, char**) {
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    // Shaders + textures
     worldShader = createShaderProgram(worldVertSrc, worldFragSrc);
     texID = loadTexture("texture.png");
     if(!texID) {
@@ -1446,7 +1530,6 @@ int main(int, char**) {
         return -1;
     }
 
-    // Background image for menu/loading
     bgTex = loadTexture("BG.png");
     if(!bgTex) {
         std::cerr << "BG.png failed to load!\n";
@@ -1459,13 +1542,10 @@ int main(int, char**) {
     initUI();
     Inventory inventory;
 
-    // Worker thread runs always, but NO JOBS are posted until New/Load is pressed.
     std::thread worker(chunkWorkerThread);
 
-    // Game state
     GameState state = GameState::MENU;
 
-    // Gameplay state vars (initialized once we start game)
     int worldSeed = 0;
     Vec3 playerFeet = {0, 40, 0};
 
@@ -1484,13 +1564,11 @@ int main(int, char**) {
         (float)SCREEN_WIDTH/(float)SCREEN_HEIGHT,
         0.1f, 140.0f);
 
-    // Loading progress tracking
     int loadingSpawnCX = 0;
     int loadingSpawnCZ = 0;
     const int totalInitialChunks = (2*renderDistance + 1) * (2*renderDistance + 1);
     float loadingProgress = 0.0f;
 
-    // Menu buttons
     float btnW = 320.0f;
     float btnH = 64.0f;
     float centerX = (SCREEN_WIDTH - btnW) * 0.5f;
@@ -1550,7 +1628,6 @@ int main(int, char**) {
         }
 
         if(!ok) {
-            // If no save exists, fallback to new game behavior
             beginNewGame();
             return;
         }
@@ -1587,7 +1664,6 @@ int main(int, char**) {
         float dt = (now - lastTime) * 0.001f;
         lastTime = now;
 
-        // Always drain uploads (used by loading screen progress)
         int uploadsThisFrame = 0;
         while(uploadsThisFrame < MAX_CHUNK_UPLOADS_PER_FRAME) {
             ChunkResult res;
@@ -1611,7 +1687,6 @@ int main(int, char**) {
             uploadsThisFrame++;
         }
 
-        // Events
         while(SDL_PollEvent(&ev)) {
             if(ev.type == SDL_QUIT) running = false;
 
@@ -1636,9 +1711,7 @@ int main(int, char**) {
                 }
             }
             else if(state == GameState::LOADING) {
-                // Block input during loading
                 if(ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_ESCAPE) {
-                    // allow cancel back to menu
                     resetWorldData(false);
                     state = GameState::MENU;
                     SDL_SetRelativeMouseMode(SDL_FALSE);
@@ -1730,13 +1803,11 @@ int main(int, char**) {
             }
         }
 
-        // Logic
         if(state == GameState::LOADING) {
             int loaded = countLoadedInitialChunks(loadingSpawnCX, loadingSpawnCZ);
             loadingProgress = (float)loaded / (float)totalInitialChunks;
 
             if(loaded >= totalInitialChunks) {
-                // Switch into gameplay
                 state = GameState::PLAYING;
                 SDL_SetRelativeMouseMode(SDL_TRUE);
             }
@@ -1823,7 +1894,6 @@ int main(int, char**) {
 
             camera.position = {playerFeet.x, playerFeet.y + EYE_HEIGHT, playerFeet.z};
 
-            // Request chunks around player
             int pcx = (int)std::floor(playerFeet.x / (float)chunkSize);
             int pcz = (int)std::floor(playerFeet.z / (float)chunkSize);
             for(int cx = pcx - renderDistance; cx <= pcx + renderDistance; cx++){
@@ -1832,11 +1902,9 @@ int main(int, char**) {
                 }
             }
 
-            // Inventory logic
             inventory.update(dt, camera);
         }
 
-        // Render
         glViewport(0,0,SCREEN_WIDTH,SCREEN_HEIGHT);
         glClearColor(0.55f,0.75f,1.0f,1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -1847,13 +1915,11 @@ int main(int, char**) {
             glDisable(GL_DEPTH_TEST);
             glEnable(GL_BLEND);
 
-            // Title
             float scale = 4.0f;
             std::string title = "C-CRAFT";
             float tw = (float)title.size() * 6.0f * scale;
             uiDrawText((SCREEN_WIDTH - tw)*0.5f, SCREEN_HEIGHT - 90.0f, title, scale, 1,1,1,1, true);
 
-            // Buttons
             int mx, my;
             SDL_GetMouseState(&mx, &my);
             float ux = (float)mx;
@@ -1879,7 +1945,6 @@ int main(int, char**) {
             Mat4 view = lookAtMatrix(camera.position, add(camera.position, forward), {0,1,0});
             renderChunks(view, projWorld, camera.position);
 
-            // UI phase
             glDisable(GL_DEPTH_TEST);
 
             if(inventory.isOpen()) {
@@ -1896,7 +1961,6 @@ int main(int, char**) {
         SDL_GL_SwapWindow(window);
     }
 
-    // Save only if we were in a started world (LOADING or PLAYING means a seed exists)
     if(state != GameState::MENU) {
         std::lock_guard<std::mutex> lk(gWorldMutex);
         saveWorld("saved_world.txt", worldSeed, playerFeet.x, playerFeet.y, playerFeet.z);
