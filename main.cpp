@@ -42,11 +42,18 @@ GLuint uiShader = 0;
 GLuint uiVAO = 0;
 GLuint uiVBO = 0;
 
-// UI textured shader (for BG.png)
-static GLuint uiTexShader = 0;
-static GLuint uiTexVAO = 0;
-static GLuint uiTexVBO = 0;
+// UI textured shaders
+static GLuint uiTexShaderFullscreen = 0;
+static GLuint uiTexVAOFullscreen = 0;
+static GLuint uiTexVBOFullscreen = 0;
+
+static GLuint uiTexShader2D = 0;
+static GLuint uiTexVAO2D = 0;
+static GLuint uiTexVBO2D = 0;
+
+// Textures
 static GLuint bgTex = 0;
+static GLuint frameTex = 0;
 
 // World shader/texture
 GLuint worldShader = 0;
@@ -67,8 +74,8 @@ static const float TICK_INTERVAL = 0.5f;
 
 // Player physics
 static const float playerWidth  = 0.6f;
-static const float playerHeight = 1.8f;     // FIX: 1.8 blocks
-static const float EYE_HEIGHT   = 1.62f;    // FIX: Minecraft-like eye height
+static const float playerHeight = 1.8f;     // Minecraft-ish
+static const float EYE_HEIGHT   = 1.62f;    // Minecraft-ish
 
 static const float WORLD_FLOOR_LIMIT = -10.0f;
 static const float GRAVITY = -9.81f;
@@ -80,6 +87,12 @@ enum class GameState {
     LOADING,
     PLAYING
 };
+
+// -------------------- HOTBAR --------------------
+// Slots 1..9 are visible frames. Slot 0 is "none selected" (virtual).
+static int gHotbar[10];          // indices 0..9, values are BlockType ints (or BLOCK_NONE)
+static int gSelectedSlot = 0;    // 0..9
+static int gLastInventorySelected = BLOCK_NONE;
 
 // -------------------- HELPERS --------------------
 static float clampf(float v, float a, float b) { return std::max(a, std::min(b, v)); }
@@ -240,7 +253,7 @@ void main(){ FragColor = uColor; }
 )";
 
 // Fullscreen textured UI shader (BG.png)
-static const char* uiTexVertSrc = R"(
+static const char* uiTexVertSrcFullscreen = R"(
 #version 330 core
 layout(location=0) in vec2 aPos;
 layout(location=1) in vec2 aUV;
@@ -252,6 +265,29 @@ void main(){
 )";
 
 static const char* uiTexFragSrc = R"(
+#version 330 core
+in vec2 vUV;
+out vec4 FragColor;
+uniform sampler2D uTex;
+void main(){
+    FragColor = texture(uTex, vUV);
+}
+)";
+
+// 2D textured shader for pixel-rects (frame.png)
+static const char* uiTexVertSrc2D = R"(
+#version 330 core
+layout(location=0) in vec2 aPos;
+layout(location=1) in vec2 aUV;
+uniform mat4 uProj;
+out vec2 vUV;
+void main(){
+    vUV = aUV;
+    gl_Position = uProj * vec4(aPos, 0.0, 1.0);
+}
+)";
+
+static const char* uiTexFragSrc2D = R"(
 #version 330 core
 in vec2 vUV;
 out vec4 FragColor;
@@ -286,10 +322,11 @@ static void initUI() {
     glEnableVertexAttribArray(0);
     glBindVertexArray(0);
 
-    // Textured fullscreen quad for BG.png
-    uiTexShader = createShaderProgram(uiTexVertSrc, uiTexFragSrc);
-    glGenVertexArrays(1, &uiTexVAO);
-    glGenBuffers(1, &uiTexVBO);
+    // Fullscreen quad shader (BG.png)
+    uiTexShaderFullscreen = createShaderProgram(uiTexVertSrcFullscreen, uiTexFragSrc);
+
+    glGenVertexArrays(1, &uiTexVAOFullscreen);
+    glGenBuffers(1, &uiTexVBOFullscreen);
 
     float quad[] = {
         // pos      // uv
@@ -301,9 +338,23 @@ static void initUI() {
         -1.f,  1.f,  0.f, 1.f
     };
 
-    glBindVertexArray(uiTexVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, uiTexVBO);
+    glBindVertexArray(uiTexVAOFullscreen);
+    glBindBuffer(GL_ARRAY_BUFFER, uiTexVBOFullscreen);
     glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void*)(2*sizeof(float)));
+    glEnableVertexAttribArray(1);
+    glBindVertexArray(0);
+
+    // 2D textured quads (frame.png)
+    uiTexShader2D = createShaderProgram(uiTexVertSrc2D, uiTexFragSrc2D);
+    glGenVertexArrays(1, &uiTexVAO2D);
+    glGenBuffers(1, &uiTexVBO2D);
+
+    glBindVertexArray(uiTexVAO2D);
+    glBindBuffer(GL_ARRAY_BUFFER, uiTexVBO2D);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 24, nullptr, GL_DYNAMIC_DRAW);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void*)(2*sizeof(float)));
@@ -335,11 +386,41 @@ static void uiDrawRect(float x, float y, float w, float h, float r, float g, flo
 
 static void uiDrawFullscreenTexture(GLuint tex) {
     if(!tex) return;
-    glUseProgram(uiTexShader);
+    glUseProgram(uiTexShaderFullscreen);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex);
-    glUniform1i(glGetUniformLocation(uiTexShader, "uTex"), 0);
-    glBindVertexArray(uiTexVAO);
+    glUniform1i(glGetUniformLocation(uiTexShaderFullscreen, "uTex"), 0);
+    glBindVertexArray(uiTexVAOFullscreen);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+}
+
+static void uiDrawTexturedRect(GLuint tex, float x, float y, float w, float h) {
+    if(!tex) return;
+
+    // x,y is bottom-left in pixel-space
+    float v[24] = {
+        // pos      // uv
+        x,   y,     0.f, 0.f,
+        x+w, y,     1.f, 0.f,
+        x+w, y+h,   1.f, 1.f,
+
+        x,   y,     0.f, 0.f,
+        x+w, y+h,   1.f, 1.f,
+        x,   y+h,   0.f, 1.f
+    };
+
+    glUseProgram(uiTexShader2D);
+    Mat4 proj = orthoPixels(SCREEN_WIDTH, SCREEN_HEIGHT);
+    glUniformMatrix4fv(glGetUniformLocation(uiTexShader2D, "uProj"), 1, GL_FALSE, proj.m);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glUniform1i(glGetUniformLocation(uiTexShader2D, "uTex"), 0);
+
+    glBindVertexArray(uiTexVAO2D);
+    glBindBuffer(GL_ARRAY_BUFFER, uiTexVBO2D);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(v), v);
     glDrawArrays(GL_TRIANGLES, 0, 6);
     glBindVertexArray(0);
 }
@@ -1124,8 +1205,7 @@ static void buildChunkVerticesCPU(int cx, int cz, std::vector<float> &outVerts)
             bool surfaceIsGrass = (top == BLOCK_GRASS);
 
             if(surfaceIsGrass && shouldPlaceTree(b, wx, wz, surfaceY)) {
-                // FIX: do NOT treat the tree's own overrides as "blocked" on rebuild.
-                // Only block if trunk-base is carved (-1) OR replaced by a non-tree block.
+                // Do NOT treat the tree's own overrides as blocked.
                 bool allowTree = true;
 
                 {
@@ -1134,26 +1214,16 @@ static void buildChunkVerticesCPU(int cx, int cz, std::vector<float> &outVerts)
                     auto it = extraBlocks.find(kBase);
                     if(it != extraBlocks.end()) {
                         BlockType t = it->second;
-
-                        // player broke trunk-base => tree stays gone
-                        if((int)t < 0) {
-                            allowTree = false;
-                        }
-                        // if player placed something else here, don't spawn a tree into it
-                        else if(!isTreeBlock(t)) {
-                            allowTree = false;
-                        }
-                        // else: it's a tree block (log/leaves) => this IS the tree data, keep it
+                        if((int)t < 0) allowTree = false;
+                        else if(!isTreeBlock(t)) allowTree = false;
                     }
                 }
 
                 if(allowTree) {
-                    // Ensure deterministic tree blocks exist, but never overwrite carved (-1) entries.
                     {
                         std::lock_guard<std::mutex> lk(gWorldMutex);
                         ensureTreeBlocksInOverrides(wx, surfaceY + 1, wz);
                     }
-                    // Render from overrides so broken logs/leaves stay gone after rebuilds.
                     addTreeFromOverrides(outVerts, wx, surfaceY + 1, wz);
                 }
             }
@@ -1294,6 +1364,122 @@ static void renderChunks(const Mat4 &view, const Mat4 &proj, const Vec3 &viewPos
         glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(chunk.vertices.size() / 5));
     }
     glBindVertexArray(0);
+}
+
+// -------------------- HOTBAR MINI BLOCK PREVIEW --------------------
+static void drawMiniBlockPreview(int blockID, float x, float y, float sizePx) {
+    if(blockID == BLOCK_NONE) return;
+
+    GLint oldViewport[4];
+    glGetIntegerv(GL_VIEWPORT, oldViewport);
+
+    // Inset slightly inside the frame
+    int inset = (int)std::max(2.0f, sizePx * 0.12f);
+    int vx = (int)x + inset;
+    int vy = (int)y + inset;
+    int vs = (int)sizePx - inset*2;
+    if(vs <= 4) vs = (int)sizePx;
+
+    glViewport(vx, vy, vs, vs);
+
+    // Clear ONLY depth so we can render a 3D cube on top of the world.
+    glClear(GL_DEPTH_BUFFER_BIT);
+
+    glUseProgram(worldShader);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, texID);
+    glUniform1i(glGetUniformLocation(worldShader, "ourTexture"), 0);
+
+    // Simple lit cube like the inventory preview
+    Mat4 proj = perspectiveMatrix(45.0f*(3.14159f/180.0f), 1.0f, 0.1f, 100.0f);
+    Vec3 eye = {0.0f, 0.0f, 2.2f};
+    Vec3 ctr = {0.0f, 0.0f, 0.0f};
+    Vec3 up  = {0.0f, 1.0f, 0.0f};
+    Mat4 view = lookAtMatrix(eye, ctr, up);
+
+    // Mild rotation so it looks Minecraft-like but stable
+    float t = (float)SDL_GetTicks() * 0.001f;
+    Mat4 model = identityMatrix();
+    // rotate around Y a bit:
+    Mat4 rot = identityMatrix();
+    float c = cosf(t * 0.7f);
+    float s = sinf(t * 0.7f);
+    rot.m[0]  =  c;
+    rot.m[2]  =  s;
+    rot.m[8]  = -s;
+    rot.m[10] =  c;
+    model = multiplyMatrix(model, rot);
+
+    Mat4 mvp = multiplyMatrix(proj, multiplyMatrix(view, model));
+    glUniformMatrix4fv(glGetUniformLocation(worldShader, "MVP"), 1, GL_FALSE, mvp.m);
+
+    // Give uniforms used by lighting shader
+    glUniform3f(glGetUniformLocation(worldShader, "sunDirection"), -0.3f, 1.0f, -0.2f);
+    glUniform3f(glGetUniformLocation(worldShader, "viewPos"), eye.x, eye.y, eye.z);
+
+    static GLuint previewVAO = 0, previewVBO = 0;
+    static bool init = false;
+    if(!init) {
+        glGenVertexArrays(1, &previewVAO);
+        glGenBuffers(1, &previewVBO);
+        init = true;
+    }
+
+    std::vector<float> verts;
+    verts.reserve(36*5);
+    // Use "false" for cull flag so all faces are visible in preview
+    addCube(verts, 0.0f, 0.0f, 0.0f, (BlockType)blockID, false);
+
+    glBindVertexArray(previewVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, previewVBO);
+    glBufferData(GL_ARRAY_BUFFER, verts.size()*sizeof(float), verts.data(), GL_DYNAMIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5*sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5*sizeof(float), (void*)(3*sizeof(float)));
+    glEnableVertexAttribArray(1);
+
+    glEnable(GL_DEPTH_TEST);
+    glDrawArrays(GL_TRIANGLES, 0, 36);
+
+    // Restore viewport
+    glViewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
+}
+
+// -------------------- HUD HOTBAR DRAW --------------------
+static void drawHotbarHUD() {
+    // Only draw slots 1..9 frames. Slot 0 is "none".
+    const float slotSize = 52.0f;
+    const float spacing  = 4.0f;
+    const float y = 10.0f;
+
+    float totalW = 9.0f * slotSize + 8.0f * spacing;
+    float startX = ((float)SCREEN_WIDTH - totalW) * 0.5f;
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    // Shadow backdrop strip
+    uiDrawRect(startX - 6.0f, y - 6.0f, totalW + 12.0f, slotSize + 12.0f, 0,0,0, 0.25f);
+
+    for(int i=1;i<=9;i++){
+        float x = startX + (i-1) * (slotSize + spacing);
+
+        // Highlight selected slot (only when selectedSlot != 0)
+        if(gSelectedSlot == i) {
+            uiDrawRect(x - 2.0f, y - 2.0f, slotSize + 4.0f, slotSize + 4.0f, 1,1,1, 0.35f);
+        }
+
+        // Draw frame texture
+        uiDrawTexturedRect(frameTex, x, y, slotSize, slotSize);
+
+        // Draw mini cube for this slot, if not empty
+        int blockID = gHotbar[i];
+        if(blockID != BLOCK_NONE) {
+            drawMiniBlockPreview(blockID, x, y, slotSize);
+        }
+    }
+
+    glDisable(GL_BLEND);
 }
 
 // -------------------- DEV OVERLAY DRAW --------------------
@@ -1445,6 +1631,11 @@ static void resetWorldData(bool wipeSaveFile) {
     if(wipeSaveFile) {
         std::remove("saved_world.txt");
     }
+
+    // Reset hotbar on new world creation/loading start
+    for(int i=0;i<10;i++) gHotbar[i] = BLOCK_NONE;
+    gSelectedSlot = 0;
+    gLastInventorySelected = BLOCK_NONE;
 }
 
 static void requestInitialChunks(int spawnChunkX, int spawnChunkZ) {
@@ -1464,6 +1655,40 @@ static int countLoadedInitialChunks(int spawnChunkX, int spawnChunkZ) {
         }
     }
     return loaded;
+}
+
+// -------------------- HOTBAR INPUT + ASSIGNMENT --------------------
+static void hotbarSelectSlot(int slot) {
+    slot = std::max(0, std::min(9, slot));
+    gSelectedSlot = slot;
+}
+
+static void hotbarScroll(int dir) {
+    // dir: +1 next, -1 prev
+    int s = gSelectedSlot;
+    s += dir;
+    if(s > 9) s = 0;
+    if(s < 0) s = 9;
+    gSelectedSlot = s;
+}
+
+static void hotbarAssignSelectedBlock(int blockID) {
+    if(blockID == BLOCK_NONE) return;
+
+    // Slot 0 is always "none selected". If player tries to assign while on 0,
+    // we move to slot 1.
+    if(gSelectedSlot == 0) gSelectedSlot = 1;
+
+    // Assign to current slot 1..9
+    if(gSelectedSlot >= 1 && gSelectedSlot <= 9) {
+        gHotbar[gSelectedSlot] = blockID;
+    }
+}
+
+static int hotbarGetActiveBlock() {
+    if(gSelectedSlot == 0) return BLOCK_NONE;
+    if(gSelectedSlot < 0 || gSelectedSlot > 9) return BLOCK_NONE;
+    return gHotbar[gSelectedSlot];
 }
 
 // -------------------- MAIN --------------------
@@ -1539,8 +1764,22 @@ int main(int, char**) {
         return -1;
     }
 
+    frameTex = loadTexture("frame.png");
+    if(!frameTex) {
+        std::cerr << "frame.png failed to load!\n";
+        SDL_GL_DeleteContext(glContext);
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return -1;
+    }
+
     initUI();
     Inventory inventory;
+
+    // init hotbar
+    for(int i=0;i<10;i++) gHotbar[i] = BLOCK_NONE;
+    gSelectedSlot = 0;
+    gLastInventorySelected = inventory.getSelectedBlock();
 
     std::thread worker(chunkWorkerThread);
 
@@ -1718,10 +1957,37 @@ int main(int, char**) {
                 }
             }
             else if(state == GameState::PLAYING) {
+                // HOTBAR input works during PLAYING even if paused/inventory open
                 if(ev.type == SDL_KEYDOWN) {
-                    if(ev.key.keysym.sym == SDLK_F3) {
+                    SDL_Keycode kc = ev.key.keysym.sym;
+
+                    // Number row
+                    if(kc == SDLK_0) hotbarSelectSlot(0);
+                    if(kc == SDLK_1) hotbarSelectSlot(1);
+                    if(kc == SDLK_2) hotbarSelectSlot(2);
+                    if(kc == SDLK_3) hotbarSelectSlot(3);
+                    if(kc == SDLK_4) hotbarSelectSlot(4);
+                    if(kc == SDLK_5) hotbarSelectSlot(5);
+                    if(kc == SDLK_6) hotbarSelectSlot(6);
+                    if(kc == SDLK_7) hotbarSelectSlot(7);
+                    if(kc == SDLK_8) hotbarSelectSlot(8);
+                    if(kc == SDLK_9) hotbarSelectSlot(9);
+
+                    // Keypad
+                    if(kc == SDLK_KP_0) hotbarSelectSlot(0);
+                    if(kc == SDLK_KP_1) hotbarSelectSlot(1);
+                    if(kc == SDLK_KP_2) hotbarSelectSlot(2);
+                    if(kc == SDLK_KP_3) hotbarSelectSlot(3);
+                    if(kc == SDLK_KP_4) hotbarSelectSlot(4);
+                    if(kc == SDLK_KP_5) hotbarSelectSlot(5);
+                    if(kc == SDLK_KP_6) hotbarSelectSlot(6);
+                    if(kc == SDLK_KP_7) hotbarSelectSlot(7);
+                    if(kc == SDLK_KP_8) hotbarSelectSlot(8);
+                    if(kc == SDLK_KP_9) hotbarSelectSlot(9);
+
+                    if(kc == SDLK_F3) {
                         showDevOverlay = !showDevOverlay;
-                    } else if(ev.key.keysym.sym == SDLK_ESCAPE) {
+                    } else if(kc == SDLK_ESCAPE) {
                         if(inventory.isOpen()) {
                             inventory.toggle();
                             SDL_SetRelativeMouseMode(SDL_TRUE);
@@ -1729,19 +1995,25 @@ int main(int, char**) {
                             paused = !paused;
                             SDL_SetRelativeMouseMode(paused ? SDL_FALSE : SDL_TRUE);
                         }
-                    } else if(ev.key.keysym.sym == SDLK_e) {
+                    } else if(kc == SDLK_e) {
                         if(!paused) {
                             inventory.toggle();
                             SDL_SetRelativeMouseMode(inventory.isOpen() ? SDL_FALSE : SDL_TRUE);
                         }
-                    } else if(!paused && !inventory.isOpen() && !isFlying && ev.key.keysym.sym == SDLK_SPACE) {
+                    } else if(!paused && !inventory.isOpen() && !isFlying && kc == SDLK_SPACE) {
                         Vec3 testFeet = playerFeet;
                         testFeet.y -= 0.05f;
                         if(checkCollisionFeet(testFeet)) verticalVelocity = JUMP_SPEED;
-                    } else if(ev.key.keysym.sym == SDLK_f) {
+                    } else if(kc == SDLK_f) {
                         isFlying = !isFlying;
                         verticalVelocity = 0.0f;
                     }
+                }
+
+                if(ev.type == SDL_MOUSEWHEEL) {
+                    // wheel.y > 0 means scroll up (previous), < 0 means next
+                    if(ev.wheel.y > 0) hotbarScroll(-1);
+                    else if(ev.wheel.y < 0) hotbarScroll(+1);
                 }
 
                 if(!paused && !inventory.isOpen()) {
@@ -1780,8 +2052,8 @@ int main(int, char**) {
                         else if(ay > ax && ay > az) py += (diff.y > 0) ? -1 : 1;
                         else pz += (diff.z > 0) ? -1 : 1;
 
-                        int blockToPlace = inventory.getSelectedBlock();
-                        if(blockToPlace != (int)BLOCK_NONE) {
+                        int blockToPlace = hotbarGetActiveBlock(); // HOTBAR drives placement
+                        if(blockToPlace != BLOCK_NONE) {
                             Vec3 pos = playerFeet;
                             float half = playerWidth * 0.5f;
                             float minX = pos.x - half, maxX = pos.x + half;
@@ -1902,7 +2174,17 @@ int main(int, char**) {
                 }
             }
 
+            // Inventory update (selection is still made in inventory)
             inventory.update(dt, camera);
+
+            // If the inventory selection changed, push it into the hotbar slot
+            int invSel = inventory.getSelectedBlock();
+            if(invSel != gLastInventorySelected) {
+                gLastInventorySelected = invSel;
+                if(invSel != BLOCK_NONE) {
+                    hotbarAssignSelectedBlock(invSel);
+                }
+            }
         }
 
         glViewport(0,0,SCREEN_WIDTH,SCREEN_HEIGHT);
@@ -1945,6 +2227,7 @@ int main(int, char**) {
             Mat4 view = lookAtMatrix(camera.position, add(camera.position, forward), {0,1,0});
             renderChunks(view, projWorld, camera.position);
 
+            // UI overlays
             glDisable(GL_DEPTH_TEST);
 
             if(inventory.isOpen()) {
@@ -1953,7 +2236,11 @@ int main(int, char**) {
             if(paused) {
                 drawPauseOverlay(true);
             }
+
             drawDevOverlay(showDevOverlay, playerFeet);
+
+            // HOTBAR HUD (draw last so it's always visible)
+            drawHotbarHUD();
 
             glEnable(GL_DEPTH_TEST);
         }
@@ -1974,13 +2261,17 @@ int main(int, char**) {
 
     glDeleteProgram(worldShader);
     glDeleteProgram(uiShader);
-    glDeleteProgram(uiTexShader);
+    glDeleteProgram(uiTexShaderFullscreen);
+    glDeleteProgram(uiTexShader2D);
 
     glDeleteVertexArrays(1, &uiVAO);
     glDeleteBuffers(1, &uiVBO);
 
-    glDeleteVertexArrays(1, &uiTexVAO);
-    glDeleteBuffers(1, &uiTexVBO);
+    glDeleteVertexArrays(1, &uiTexVAOFullscreen);
+    glDeleteBuffers(1, &uiTexVBOFullscreen);
+
+    glDeleteVertexArrays(1, &uiTexVAO2D);
+    glDeleteBuffers(1, &uiTexVBO2D);
 
     SDL_GL_DeleteContext(glContext);
     SDL_DestroyWindow(window);
