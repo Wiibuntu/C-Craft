@@ -94,6 +94,12 @@ static int gHotbar[10];          // indices 0..9, values are BlockType ints (or 
 static int gSelectedSlot = 0;    // 0..9
 static int gLastInventorySelected = BLOCK_NONE;
 
+// Forward declarations (UI draw helpers call these before their definitions later in the file)
+static void hotbarSelectSlot(int slot);
+static void hotbarScroll(int dir);
+static void hotbarAssignSelectedBlock(int blockID);
+static int  hotbarGetActiveBlock();
+
 // -------------------- HELPERS --------------------
 static float clampf(float v, float a, float b) { return std::max(a, std::min(b, v)); }
 
