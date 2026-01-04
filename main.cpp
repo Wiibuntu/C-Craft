@@ -17,6 +17,8 @@
 #include <atomic>
 #include <sstream>
 #include <iomanip>
+#include <cstring>
+#include <cstdio>
 
 #include "math.h"
 #include "shader.h"
@@ -31,16 +33,22 @@
 // -------------------- GLOBALS --------------------
 GLuint handTex = 0;
 
-// Screen (declared extern in globals.h)
+// Screen
 int SCREEN_WIDTH  = 960;
 int SCREEN_HEIGHT = 540;
 
-// UI shader + quad buffer
+// UI shader + quad buffer (solid color)
 GLuint uiShader = 0;
 GLuint uiVAO = 0;
 GLuint uiVBO = 0;
 
-// World shader/texture (declared extern in globals.h)
+// UI textured shader (for BG.png)
+static GLuint uiTexShader = 0;
+static GLuint uiTexVAO = 0;
+static GLuint uiTexVBO = 0;
+static GLuint bgTex = 0;
+
+// World shader/texture
 GLuint worldShader = 0;
 GLuint texID = 0;
 
@@ -60,24 +68,21 @@ static const float TICK_INTERVAL = 0.5f;
 // Player physics
 static const float playerWidth  = 0.6f;
 static const float playerHeight = 2.0f;
-static const float EYE_HEIGHT   = 2.0f; // camera 2 blocks high
+static const float EYE_HEIGHT   = 2.0f; // camera is 2 blocks above feet
 static const float WORLD_FLOOR_LIMIT = -10.0f;
 static const float GRAVITY = -9.81f;
 static const float JUMP_SPEED = 5.0f;
 
+// -------------------- GAME STATE --------------------
+enum class GameState {
+    MENU,
+    LOADING,
+    PLAYING
+};
+
 // -------------------- HELPERS --------------------
 static float clampf(float v, float a, float b) { return std::max(a, std::min(b, v)); }
 
-Mat4 translateMatrix(float tx, float ty, float tz) {
-    Mat4 mat = identityMatrix();
-    mat.m[12] = tx; mat.m[13] = ty; mat.m[14] = tz;
-    return mat;
-}
-Mat4 scaleMatrix(float sx, float sy, float sz) {
-    Mat4 mat = identityMatrix();
-    mat.m[0] = sx; mat.m[5] = sy; mat.m[10] = sz;
-    return mat;
-}
 static float smoothstep(float edge0, float edge1, float x) {
     float t = (x - edge0) / (edge1 - edge0);
     t = clampf(t, 0.0f, 1.0f);
@@ -85,12 +90,12 @@ static float smoothstep(float edge0, float edge1, float x) {
 }
 static float mix(float a, float b, float t) { return a + t * (b - a); }
 
-// Local "pseudo-3D" noise built from 2D perlin/fbm, so we don't need noise.h changes.
+// Local "pseudo-3D" noise built from 2D perlin/fbm
 static float noise3Pseudo(float x, float y, float z) {
     float a = perlinNoise(x, y);
     float b = perlinNoise(y, z);
     float c = perlinNoise(x, z);
-    return (a + b + c) * (1.0f / 3.0f); // roughly [-1..1]
+    return (a + b + c) * (1.0f / 3.0f);
 }
 static float fbmNoise3Pseudo(float x, float y, float z, int octaves, float lacunarity, float gain) {
     float amp = 1.0f;
@@ -105,6 +110,16 @@ static float fbmNoise3Pseudo(float x, float y, float z, int octaves, float lacun
     }
     if(norm > 0.0f) sum /= norm;
     return sum;
+}
+
+// Deterministic hash (for tree sprinkle)
+static uint32_t hash2i(int x, int z) {
+    uint32_t h = 2166136261u;
+    h ^= (uint32_t)x; h *= 16777619u;
+    h ^= (uint32_t)z; h *= 16777619u;
+    h ^= (h >> 13); h *= 0x5bd1e995u;
+    h ^= (h >> 15);
+    return h;
 }
 
 // -------------------- BIOMES --------------------
@@ -223,21 +238,29 @@ uniform vec4 uColor;
 void main(){ FragColor = uColor; }
 )";
 
-// -------------------- UI INIT --------------------
-static void initUI() {
-    uiShader = createShaderProgram(uiVertSrc, uiFragSrc);
-    glGenVertexArrays(1, &uiVAO);
-    glGenBuffers(1, &uiVBO);
-
-    glBindVertexArray(uiVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, uiVBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(float)*12, nullptr, GL_DYNAMIC_DRAW);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2*sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    glBindVertexArray(0);
+// Fullscreen textured UI shader (BG.png)
+static const char* uiTexVertSrc = R"(
+#version 330 core
+layout(location=0) in vec2 aPos;
+layout(location=1) in vec2 aUV;
+out vec2 vUV;
+void main(){
+    vUV = aUV;
+    gl_Position = vec4(aPos, 0.0, 1.0);
 }
+)";
 
-// Ortho proj in screen pixels (origin bottom-left for our UI coords)
+static const char* uiTexFragSrc = R"(
+#version 330 core
+in vec2 vUV;
+out vec4 FragColor;
+uniform sampler2D uTex;
+void main(){
+    FragColor = texture(uTex, vUV);
+}
+)";
+
+// -------------------- UI INIT --------------------
 static Mat4 orthoPixels(int w, int h) {
     Mat4 proj = {};
     proj.m[0]  = 2.0f/(float)w;
@@ -247,6 +270,45 @@ static Mat4 orthoPixels(int w, int h) {
     proj.m[12] = -1.0f;
     proj.m[13] = -1.0f;
     return proj;
+}
+
+static void initUI() {
+    uiShader = createShaderProgram(uiVertSrc, uiFragSrc);
+
+    glGenVertexArrays(1, &uiVAO);
+    glGenBuffers(1, &uiVBO);
+
+    glBindVertexArray(uiVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, uiVBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(float)*12, nullptr, GL_DYNAMIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2*sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glBindVertexArray(0);
+
+    // Textured fullscreen quad for BG.png
+    uiTexShader = createShaderProgram(uiTexVertSrc, uiTexFragSrc);
+    glGenVertexArrays(1, &uiTexVAO);
+    glGenBuffers(1, &uiTexVBO);
+
+    // Clip-space quad with UVs
+    float quad[] = {
+        // pos      // uv
+        -1.f, -1.f,  0.f, 0.f,
+         1.f, -1.f,  1.f, 0.f,
+         1.f,  1.f,  1.f, 1.f,
+        -1.f, -1.f,  0.f, 0.f,
+         1.f,  1.f,  1.f, 1.f,
+        -1.f,  1.f,  0.f, 1.f
+    };
+
+    glBindVertexArray(uiTexVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, uiTexVBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void*)(2*sizeof(float)));
+    glEnableVertexAttribArray(1);
+    glBindVertexArray(0);
 }
 
 static void uiDrawRect(float x, float y, float w, float h, float r, float g, float b, float a) {
@@ -271,62 +333,66 @@ static void uiDrawRect(float x, float y, float w, float h, float r, float g, flo
     glBindVertexArray(0);
 }
 
-// -------------------- 5x7 DEV FONT --------------------
-// Each glyph is 5 wide x 7 tall, stored as 7 rows of 5 bits (MSB->LSB not important; we use bit tests).
-static void glyph5x7(char c, uint8_t outRows[7]) {
-    // default = blank
-    for(int i=0;i<7;i++) outRows[i]=0;
+static void uiDrawFullscreenTexture(GLuint tex) {
+    if(!tex) return;
+    glUseProgram(uiTexShader);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glUniform1i(glGetUniformLocation(uiTexShader, "uTex"), 0);
+    glBindVertexArray(uiTexVAO);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+}
 
-    // uppercase everything to keep table small
+// -------------------- 5x7 DEV FONT --------------------
+static void glyph5x7(char c, uint8_t outRows[7]) {
+    for(int i=0;i<7;i++) outRows[i]=0;
     if(c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
 
     switch(c) {
         case ' ': return;
+        case '-': { uint8_t r[7]={0,0,0,0b11111,0,0,0}; std::memcpy(outRows,r,7); return; }
+        case '_': { uint8_t r[7]={0,0,0,0,0,0,0b11111}; std::memcpy(outRows,r,7); return; }
+        case ':': { uint8_t r[7]={0,0b00100,0b00100,0,0b00100,0b00100,0}; std::memcpy(outRows,r,7); return; }
+        case '.': { uint8_t r[7]={0,0,0,0,0,0b00100,0b00100}; std::memcpy(outRows,r,7); return; }
 
-        case '-': { uint8_t r[7]={0,0,0,0b11111,0,0,0}; memcpy(outRows,r,7); return; }
-        case '_': { uint8_t r[7]={0,0,0,0,0,0,0b11111}; memcpy(outRows,r,7); return; }
-        case ':': { uint8_t r[7]={0,0b00100,0b00100,0,0b00100,0b00100,0}; memcpy(outRows,r,7); return; }
-        case '.': { uint8_t r[7]={0,0,0,0,0,0b00100,0b00100}; memcpy(outRows,r,7); return; }
+        case '0': { uint8_t r[7]={0b01110,0b10001,0b10011,0b10101,0b11001,0b10001,0b01110}; std::memcpy(outRows,r,7); return; }
+        case '1': { uint8_t r[7]={0b00100,0b01100,0b00100,0b00100,0b00100,0b00100,0b01110}; std::memcpy(outRows,r,7); return; }
+        case '2': { uint8_t r[7]={0b01110,0b10001,0b00001,0b00010,0b00100,0b01000,0b11111}; std::memcpy(outRows,r,7); return; }
+        case '3': { uint8_t r[7]={0b11110,0b00001,0b00001,0b01110,0b00001,0b00001,0b11110}; std::memcpy(outRows,r,7); return; }
+        case '4': { uint8_t r[7]={0b00010,0b00110,0b01010,0b10010,0b11111,0b00010,0b00010}; std::memcpy(outRows,r,7); return; }
+        case '5': { uint8_t r[7]={0b11111,0b10000,0b10000,0b11110,0b00001,0b00001,0b11110}; std::memcpy(outRows,r,7); return; }
+        case '6': { uint8_t r[7]={0b00110,0b01000,0b10000,0b11110,0b10001,0b10001,0b01110}; std::memcpy(outRows,r,7); return; }
+        case '7': { uint8_t r[7]={0b11111,0b00001,0b00010,0b00100,0b01000,0b01000,0b01000}; std::memcpy(outRows,r,7); return; }
+        case '8': { uint8_t r[7]={0b01110,0b10001,0b10001,0b01110,0b10001,0b10001,0b01110}; std::memcpy(outRows,r,7); return; }
+        case '9': { uint8_t r[7]={0b01110,0b10001,0b10001,0b01111,0b00001,0b00010,0b01100}; std::memcpy(outRows,r,7); return; }
 
-        // digits
-        case '0': { uint8_t r[7]={0b01110,0b10001,0b10011,0b10101,0b11001,0b10001,0b01110}; memcpy(outRows,r,7); return; }
-        case '1': { uint8_t r[7]={0b00100,0b01100,0b00100,0b00100,0b00100,0b00100,0b01110}; memcpy(outRows,r,7); return; }
-        case '2': { uint8_t r[7]={0b01110,0b10001,0b00001,0b00010,0b00100,0b01000,0b11111}; memcpy(outRows,r,7); return; }
-        case '3': { uint8_t r[7]={0b11110,0b00001,0b00001,0b01110,0b00001,0b00001,0b11110}; memcpy(outRows,r,7); return; }
-        case '4': { uint8_t r[7]={0b00010,0b00110,0b01010,0b10010,0b11111,0b00010,0b00010}; memcpy(outRows,r,7); return; }
-        case '5': { uint8_t r[7]={0b11111,0b10000,0b10000,0b11110,0b00001,0b00001,0b11110}; memcpy(outRows,r,7); return; }
-        case '6': { uint8_t r[7]={0b00110,0b01000,0b10000,0b11110,0b10001,0b10001,0b01110}; memcpy(outRows,r,7); return; }
-        case '7': { uint8_t r[7]={0b11111,0b00001,0b00010,0b00100,0b01000,0b01000,0b01000}; memcpy(outRows,r,7); return; }
-        case '8': { uint8_t r[7]={0b01110,0b10001,0b10001,0b01110,0b10001,0b10001,0b01110}; memcpy(outRows,r,7); return; }
-        case '9': { uint8_t r[7]={0b01110,0b10001,0b10001,0b01111,0b00001,0b00010,0b01100}; memcpy(outRows,r,7); return; }
-
-        // letters A-Z (minimal set used by overlay/biomes; included full for safety)
-        case 'A': { uint8_t r[7]={0b01110,0b10001,0b10001,0b11111,0b10001,0b10001,0b10001}; memcpy(outRows,r,7); return; }
-        case 'B': { uint8_t r[7]={0b11110,0b10001,0b10001,0b11110,0b10001,0b10001,0b11110}; memcpy(outRows,r,7); return; }
-        case 'C': { uint8_t r[7]={0b01110,0b10001,0b10000,0b10000,0b10000,0b10001,0b01110}; memcpy(outRows,r,7); return; }
-        case 'D': { uint8_t r[7]={0b11110,0b10001,0b10001,0b10001,0b10001,0b10001,0b11110}; memcpy(outRows,r,7); return; }
-        case 'E': { uint8_t r[7]={0b11111,0b10000,0b10000,0b11110,0b10000,0b10000,0b11111}; memcpy(outRows,r,7); return; }
-        case 'F': { uint8_t r[7]={0b11111,0b10000,0b10000,0b11110,0b10000,0b10000,0b10000}; memcpy(outRows,r,7); return; }
-        case 'G': { uint8_t r[7]={0b01110,0b10001,0b10000,0b10111,0b10001,0b10001,0b01110}; memcpy(outRows,r,7); return; }
-        case 'H': { uint8_t r[7]={0b10001,0b10001,0b10001,0b11111,0b10001,0b10001,0b10001}; memcpy(outRows,r,7); return; }
-        case 'I': { uint8_t r[7]={0b01110,0b00100,0b00100,0b00100,0b00100,0b00100,0b01110}; memcpy(outRows,r,7); return; }
-        case 'J': { uint8_t r[7]={0b00111,0b00010,0b00010,0b00010,0b10010,0b10010,0b01100}; memcpy(outRows,r,7); return; }
-        case 'K': { uint8_t r[7]={0b10001,0b10010,0b10100,0b11000,0b10100,0b10010,0b10001}; memcpy(outRows,r,7); return; }
-        case 'L': { uint8_t r[7]={0b10000,0b10000,0b10000,0b10000,0b10000,0b10000,0b11111}; memcpy(outRows,r,7); return; }
-        case 'M': { uint8_t r[7]={0b10001,0b11011,0b10101,0b10101,0b10001,0b10001,0b10001}; memcpy(outRows,r,7); return; }
-        case 'N': { uint8_t r[7]={0b10001,0b11001,0b10101,0b10011,0b10001,0b10001,0b10001}; memcpy(outRows,r,7); return; }
-        case 'O': { uint8_t r[7]={0b01110,0b10001,0b10001,0b10001,0b10001,0b10001,0b01110}; memcpy(outRows,r,7); return; }
-        case 'P': { uint8_t r[7]={0b11110,0b10001,0b10001,0b11110,0b10000,0b10000,0b10000}; memcpy(outRows,r,7); return; }
-        case 'Q': { uint8_t r[7]={0b01110,0b10001,0b10001,0b10001,0b10101,0b10010,0b01101}; memcpy(outRows,r,7); return; }
-        case 'R': { uint8_t r[7]={0b11110,0b10001,0b10001,0b11110,0b10100,0b10010,0b10001}; memcpy(outRows,r,7); return; }
-        case 'S': { uint8_t r[7]={0b01111,0b10000,0b10000,0b01110,0b00001,0b00001,0b11110}; memcpy(outRows,r,7); return; }
-        case 'T': { uint8_t r[7]={0b11111,0b00100,0b00100,0b00100,0b00100,0b00100,0b00100}; memcpy(outRows,r,7); return; }
-        case 'U': { uint8_t r[7]={0b10001,0b10001,0b10001,0b10001,0b10001,0b10001,0b01110}; memcpy(outRows,r,7); return; }
-        case 'V': { uint8_t r[7]={0b10001,0b10001,0b10001,0b10001,0b10001,0b01010,0b00100}; memcpy(outRows,r,7); return; }
-        case 'W': { uint8_t r[7]={0b10001,0b10001,0b10001,0b10101,0b10101,0b10101,0b01010}; memcpy(outRows,r,7); return; }
-        case 'X': { uint8_t r[7]={0b10001,0b10001,0b01010,0b00100,0b01010,0b10001,0b10001}; memcpy(outRows,r,7); return; }
-        case 'Y': { uint8_t r[7]={0b10001,0b10001,0b01010,0b00100,0b00100,0b00100,0b00100}; memcpy(outRows,r,7); return; }
-        case 'Z': { uint8_t r[7]={0b11111,0b00001,0b00010,0b00100,0b01000,0b10000,0b11111}; memcpy(outRows,r,7); return; }
+        case 'A': { uint8_t r[7]={0b01110,0b10001,0b10001,0b11111,0b10001,0b10001,0b10001}; std::memcpy(outRows,r,7); return; }
+        case 'B': { uint8_t r[7]={0b11110,0b10001,0b10001,0b11110,0b10001,0b10001,0b11110}; std::memcpy(outRows,r,7); return; }
+        case 'C': { uint8_t r[7]={0b01110,0b10001,0b10000,0b10000,0b10000,0b10001,0b01110}; std::memcpy(outRows,r,7); return; }
+        case 'D': { uint8_t r[7]={0b11110,0b10001,0b10001,0b10001,0b10001,0b10001,0b11110}; std::memcpy(outRows,r,7); return; }
+        case 'E': { uint8_t r[7]={0b11111,0b10000,0b10000,0b11110,0b10000,0b10000,0b11111}; std::memcpy(outRows,r,7); return; }
+        case 'F': { uint8_t r[7]={0b11111,0b10000,0b10000,0b11110,0b10000,0b10000,0b10000}; std::memcpy(outRows,r,7); return; }
+        case 'G': { uint8_t r[7]={0b01110,0b10001,0b10000,0b10111,0b10001,0b10001,0b01110}; std::memcpy(outRows,r,7); return; }
+        case 'H': { uint8_t r[7]={0b10001,0b10001,0b10001,0b11111,0b10001,0b10001,0b10001}; std::memcpy(outRows,r,7); return; }
+        case 'I': { uint8_t r[7]={0b01110,0b00100,0b00100,0b00100,0b00100,0b00100,0b01110}; std::memcpy(outRows,r,7); return; }
+        case 'J': { uint8_t r[7]={0b00111,0b00010,0b00010,0b00010,0b10010,0b10010,0b01100}; std::memcpy(outRows,r,7); return; }
+        case 'K': { uint8_t r[7]={0b10001,0b10010,0b10100,0b11000,0b10100,0b10010,0b10001}; std::memcpy(outRows,r,7); return; }
+        case 'L': { uint8_t r[7]={0b10000,0b10000,0b10000,0b10000,0b10000,0b10000,0b11111}; std::memcpy(outRows,r,7); return; }
+        case 'M': { uint8_t r[7]={0b10001,0b11011,0b10101,0b10101,0b10001,0b10001,0b10001}; std::memcpy(outRows,r,7); return; }
+        case 'N': { uint8_t r[7]={0b10001,0b11001,0b10101,0b10011,0b10001,0b10001,0b10001}; std::memcpy(outRows,r,7); return; }
+        case 'O': { uint8_t r[7]={0b01110,0b10001,0b10001,0b10001,0b10001,0b10001,0b01110}; std::memcpy(outRows,r,7); return; }
+        case 'P': { uint8_t r[7]={0b11110,0b10001,0b10001,0b11110,0b10000,0b10000,0b10000}; std::memcpy(outRows,r,7); return; }
+        case 'Q': { uint8_t r[7]={0b01110,0b10001,0b10001,0b10001,0b10101,0b10010,0b01101}; std::memcpy(outRows,r,7); return; }
+        case 'R': { uint8_t r[7]={0b11110,0b10001,0b10001,0b11110,0b10100,0b10010,0b10001}; std::memcpy(outRows,r,7); return; }
+        case 'S': { uint8_t r[7]={0b01111,0b10000,0b10000,0b01110,0b00001,0b00001,0b11110}; std::memcpy(outRows,r,7); return; }
+        case 'T': { uint8_t r[7]={0b11111,0b00100,0b00100,0b00100,0b00100,0b00100,0b00100}; std::memcpy(outRows,r,7); return; }
+        case 'U': { uint8_t r[7]={0b10001,0b10001,0b10001,0b10001,0b10001,0b10001,0b01110}; std::memcpy(outRows,r,7); return; }
+        case 'V': { uint8_t r[7]={0b10001,0b10001,0b10001,0b10001,0b10001,0b01010,0b00100}; std::memcpy(outRows,r,7); return; }
+        case 'W': { uint8_t r[7]={0b10001,0b10001,0b10001,0b10101,0b10101,0b10101,0b01010}; std::memcpy(outRows,r,7); return; }
+        case 'X': { uint8_t r[7]={0b10001,0b10001,0b01010,0b00100,0b01010,0b10001,0b10001}; std::memcpy(outRows,r,7); return; }
+        case 'Y': { uint8_t r[7]={0b10001,0b10001,0b01010,0b00100,0b00100,0b00100,0b00100}; std::memcpy(outRows,r,7); return; }
+        case 'Z': { uint8_t r[7]={0b11111,0b00001,0b00010,0b00100,0b01000,0b10000,0b11111}; std::memcpy(outRows,r,7); return; }
 
         default: return;
     }
@@ -336,12 +402,9 @@ static void uiDrawText(float x, float y, const std::string &text, float scale,
                        float r, float g, float b, float a,
                        bool shadow)
 {
-    // Our UI coords are bottom-left origin.
-    // For "top-left overlay", caller should convert using SCREEN_HEIGHT.
     const float px = scale;
     const float py = scale;
-    const float charW = 6.0f * px;   // 5 px glyph + 1 px gap
-    const float charH = 8.0f * py;   // 7 px glyph + 1 px gap
+    const float charW = 6.0f * px;
 
     auto drawPass = [&](float ox, float oy, float rr, float gg, float bb, float aa){
         float cx = x + ox;
@@ -361,13 +424,20 @@ static void uiDrawText(float x, float y, const std::string &text, float scale,
         }
     };
 
-    if(shadow) {
-        drawPass(scale, -scale, 0.0f, 0.0f, 0.0f, a*0.75f);
-    }
+    if(shadow) drawPass(scale, -scale, 0.0f, 0.0f, 0.0f, a*0.75f);
     drawPass(0.0f, 0.0f, r, g, b, a);
 }
 
-// -------------------- BIOME MAP / HEIGHT --------------------
+// -------------------- DEV OVERLAY --------------------
+static std::string fmtFloat1(float v) {
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(1) << v;
+    return ss.str();
+}
+
+static void drawDevOverlay(bool show, const Vec3 &playerFeet);
+
+// -------------------- BIOME / HEIGHT --------------------
 static void getClimate(float x, float z, float &temp01, float &humid01, float &weird01)
 {
     float t = fbmNoise(x * 0.0008f + 100.0f, z * 0.0008f - 100.0f, 4, 2.0f, 0.5f);
@@ -422,7 +492,6 @@ static Biome getBiome(int x, int z)
     return BIOME_PLAINS;
 }
 
-// "Near ocean" test for desert water rule
 static bool nearOcean(int x, int z)
 {
     float o0 = oceanMask((float)x, (float)z);
@@ -490,7 +559,6 @@ static int getExtremeHillsBase(int x, int z)
     return (int)h;
 }
 
-// Caves/overhang-ish carve using pseudo-3D
 static bool isCaveCarve(int x, int y, int z, int surfaceY)
 {
     if(y >= surfaceY - 4) return false;
@@ -504,7 +572,6 @@ static bool isCaveCarve(int x, int y, int z, int surfaceY)
     return (n > 0.55f);
 }
 
-// Extreme hills density field (also uses pseudo-3D)
 static bool mountainDensity(int x, int y, int z, int baseSurface)
 {
     float xf = (float)x;
@@ -560,11 +627,10 @@ static bool shouldPlaceTree(Biome b, int x, int z, int surfaceY)
 {
     if(surfaceY <= SEA_LEVEL + 1) return false;
 
-    // Required: PLAINS + EXTREME_HILLS must spawn trees
+    // Required: plains + extreme hills must spawn trees
     if(!(b == BIOME_FOREST || b == BIOME_PLAINS || b == BIOME_TAIGA || b == BIOME_EXTREME_HILLS))
         return false;
 
-    // slope check
     auto hAt = [&](int ax, int az)->int {
         if(b == BIOME_EXTREME_HILLS) return getExtremeHillsBase(ax, az);
         return getHeight2D(ax, az, b);
@@ -586,15 +652,12 @@ static bool shouldPlaceTree(Biome b, int x, int z, int surfaceY)
     if(b == BIOME_FOREST) thresh = 0.78f;
     else if(b == BIOME_TAIGA) thresh = 0.84f;
     else if(b == BIOME_EXTREME_HILLS) thresh = 0.84f;
-    else if(b == BIOME_PLAINS) thresh = 0.88f;
+    else if(b == BIOME_PLAINS) thresh = 0.83f; // boosted plains
 
-    float macro = fbmNoise(x * 0.02f + 500.0f, z * 0.02f - 500.0f, 2, 2.0f, 0.5f);
-    float macro01 = (macro + 1.0f) * 0.5f;
-    float bonus = 0.0f;
-    if(b == BIOME_PLAINS || b == BIOME_EXTREME_HILLS) bonus = (macro01 - 0.5f) * 0.06f;
-    thresh -= bonus;
+    uint32_t h = hash2i(x, z);
+    bool sprinkle = ((h & 127u) == 0u); // ~1/128
 
-    return n01 > thresh;
+    return (n01 > thresh) || sprinkle;
 }
 
 static void addProceduralTree(std::vector<float> &out, int x, int y, int z)
@@ -627,14 +690,12 @@ static bool blockHasCollision(BlockType t) {
 bool isSolidBlock(int bx, int by, int bz) {
     auto key = std::make_tuple(bx, by, bz);
 
-    // overrides
     if(extraBlocks.find(key) != extraBlocks.end()){
         BlockType t = extraBlocks[key];
         if((int)t < 0) return false;
         return blockHasCollision(t);
     }
 
-    // flowing water set
     if(waterLevels.find(key) != waterLevels.end())
         return false;
 
@@ -919,7 +980,7 @@ static void buildChunkVerticesCPU(int cx, int cz, std::vector<float> &outVerts)
                 ? getExtremeHillsBase(wx, wz)
                 : getHeight2D(wx, wz, b);
 
-            // beaches
+            // Beach band
             if(b != BIOME_DESERT && b != BIOME_EXTREME_HILLS) {
                 if(surfaceY <= SEA_LEVEL + 2 && surfaceY >= SEA_LEVEL - 2)
                     b = BIOME_BEACH;
@@ -975,8 +1036,7 @@ static void buildChunkVerticesCPU(int cx, int cz, std::vector<float> &outVerts)
                 addCube(outVerts, (float)wx, (float)y, (float)wz, bt, true);
             }
 
-            // ---- WATER FILL RULES ----
-            // Desert: NO inland water; only if near ocean.
+            // Water fill rule: desert only gets water fill near ocean
             bool allowWaterFill = true;
             if(b == BIOME_DESERT && !nearOcean(wx, wz)) allowWaterFill = false;
 
@@ -995,8 +1055,11 @@ static void buildChunkVerticesCPU(int cx, int cz, std::vector<float> &outVerts)
                 }
             }
 
-            // ---- TREES ----
-            if(shouldPlaceTree(b, wx, wz, surfaceY)) {
+            // TREES: ONLY ON GRASS
+            BlockType top = surfaceTopForBiome(b, surfaceY);
+            bool surfaceIsGrass = (top == BLOCK_GRASS);
+
+            if(surfaceIsGrass && shouldPlaceTree(b, wx, wz, surfaceY)) {
                 bool hasOverride=false, carved=false;
                 {
                     std::lock_guard<std::mutex> lk(gWorldMutex);
@@ -1009,7 +1072,7 @@ static void buildChunkVerticesCPU(int cx, int cz, std::vector<float> &outVerts)
         }
     }
 
-    // Explicit water cells (flow system)
+    // Explicit water cells
     std::vector<std::tuple<int,int,int>> wl;
     {
         std::lock_guard<std::mutex> lk(gWorldMutex);
@@ -1145,23 +1208,14 @@ static void renderChunks(const Mat4 &view, const Mat4 &proj, const Vec3 &viewPos
     glBindVertexArray(0);
 }
 
-// -------------------- DEV OVERLAY --------------------
-static std::string fmtFloat1(float v) {
-    std::ostringstream ss;
-    ss << std::fixed << std::setprecision(1) << v;
-    return ss.str();
-}
-
+// -------------------- DEV OVERLAY DRAW --------------------
 static void drawDevOverlay(bool show, const Vec3 &playerFeet) {
     if(!show) return;
 
-    // Convert top-left desired position to our bottom-left UI coords:
-    // top margin of 10px, line height ~ 12*scale
     float scale = 2.0f;
     float left = 10.0f;
     float top = (float)SCREEN_HEIGHT - 10.0f;
 
-    // draw semi-transparent backing
     float panelW = 380.0f;
     float panelH = 4.0f * (10.0f * scale) + 12.0f;
     uiDrawRect(left - 6.0f, top - panelH + 6.0f, panelW, panelH, 0.0f, 0.0f, 0.0f, 0.35f);
@@ -1175,9 +1229,7 @@ static void drawDevOverlay(bool show, const Vec3 &playerFeet) {
     std::string line3 = std::string("BIOME: ") + biomeToString(b);
     std::string line4 = "VERSION PLACEHOLDER";
 
-    // Our uiDrawText expects bottom-left y
     float lineY = top - (10.0f * scale);
-
     uiDrawText(left, lineY, line1, scale, 1,1,1,1, true);
     lineY -= (10.0f * scale);
     uiDrawText(left, lineY, line2, scale, 1,1,1,1, true);
@@ -1187,30 +1239,150 @@ static void drawDevOverlay(bool show, const Vec3 &playerFeet) {
     uiDrawText(left, lineY, line4, scale, 1,1,1,1, true);
 }
 
-// -------------------- MAIN --------------------
-int main(int, char**) {
-    float loadedX = 0.0f, loadedY = 30.0f, loadedZ = 0.0f;
-    int loadedSeed = 0;
+// -------------------- PAUSE OVERLAY --------------------
+static void drawPauseOverlay(bool paused) {
+    if(!paused) return;
 
-    bool loadedOk = false;
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    uiDrawRect(0, 0, (float)SCREEN_WIDTH, (float)SCREEN_HEIGHT, 0,0,0, 0.55f);
+
+    float scale = 4.0f;
+    std::string title = "PAUSED";
+    float approxW = (float)title.size() * 6.0f * scale;
+    float x = ((float)SCREEN_WIDTH - approxW) * 0.5f;
+    float y = ((float)SCREEN_HEIGHT * 0.5f);
+
+    uiDrawText(x, y, title, scale, 1,1,1,1, true);
+
+    float scale2 = 2.0f;
+    std::string hint = "PRESS ESC TO RESUME";
+    float approxW2 = (float)hint.size() * 6.0f * scale2;
+    float x2 = ((float)SCREEN_WIDTH - approxW2) * 0.5f;
+    uiDrawText(x2, y - 40.0f, hint, scale2, 1,1,1,1, true);
+
+    glDisable(GL_BLEND);
+}
+
+// -------------------- MENU + LOADING UI --------------------
+struct UIButton {
+    float x,y,w,h;
+    std::string label;
+};
+
+static bool pointInRect(float px, float py, const UIButton &b) {
+    return (px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h);
+}
+
+static void drawButton(const UIButton &b, bool hovered) {
+    float bgA = hovered ? 0.70f : 0.55f;
+    uiDrawRect(b.x, b.y, b.w, b.h, 0.0f, 0.0f, 0.0f, bgA);
+    uiDrawRect(b.x+2, b.y+2, b.w-4, b.h-4, 1.0f, 1.0f, 1.0f, 0.10f);
+
+    float scale = 3.0f;
+    float textW = (float)b.label.size() * 6.0f * scale;
+    float tx = b.x + (b.w - textW) * 0.5f;
+    float ty = b.y + (b.h * 0.5f) - (7.0f * scale * 0.5f);
+    uiDrawText(tx, ty, b.label, scale, 1,1,1,1, true);
+}
+
+static void drawLoadingScreen(float progress01) {
+    uiDrawFullscreenTexture(bgTex);
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    float panelW = 520.0f;
+    float panelH = 160.0f;
+    float px = (SCREEN_WIDTH - panelW) * 0.5f;
+    float py = (SCREEN_HEIGHT - panelH) * 0.5f;
+    uiDrawRect(px, py, panelW, panelH, 0,0,0, 0.55f);
+
+    float scale = 3.0f;
+    std::string title = "LEVEL LOADING";
+    float tw = (float)title.size() * 6.0f * scale;
+    uiDrawText(px + (panelW - tw) * 0.5f, py + panelH - 50.0f, title, scale, 1,1,1,1, true);
+
+    // Progress bar
+    float barX = px + 40.0f;
+    float barY = py + 45.0f;
+    float barW = panelW - 80.0f;
+    float barH = 26.0f;
+
+    uiDrawRect(barX, barY, barW, barH, 0,0,0, 0.65f);
+    uiDrawRect(barX+2, barY+2, barW-4, barH-4, 1,1,1, 0.10f);
+
+    float fill = clampf(progress01, 0.0f, 1.0f);
+    uiDrawRect(barX+4, barY+4, (barW-8)*fill, barH-8, 1,1,1, 0.55f);
+
+    glDisable(GL_BLEND);
+}
+
+// -------------------- WORLD RESET / START --------------------
+static void clearChunkGPU() {
+    for(auto &kv : chunks) {
+        glDeleteVertexArrays(1, &kv.second.VAO);
+        glDeleteBuffers(1, &kv.second.VBO);
+    }
+    chunks.clear();
+}
+
+static void clearAsyncQueues() {
+    {
+        std::lock_guard<std::mutex> lk(gJobMutex);
+        std::queue<ChunkJob> empty;
+        std::swap(gJobQueue, empty);
+    }
+    {
+        std::lock_guard<std::mutex> lk(gDoneMutex);
+        std::queue<ChunkResult> empty;
+        std::swap(gDoneQueue, empty);
+    }
+    {
+        std::lock_guard<std::mutex> lk(gRequestedMutex);
+        gRequested.clear();
+    }
+}
+
+static void resetWorldData(bool wipeSaveFile) {
+    // Stop any pending async work and clear GPU chunks
+    clearAsyncQueues();
+    clearChunkGPU();
+
+    // Clear world override maps
     {
         std::lock_guard<std::mutex> lk(gWorldMutex);
-        loadedOk = loadWorld("saved_world.txt", loadedSeed, loadedX, loadedY, loadedZ);
+        extraBlocks.clear();
+        waterLevels.clear();
     }
 
-    if(loadedOk) {
-        std::cout << "[World] Loaded seed=" << loadedSeed
-                  << " feet(" << loadedX << "," << loadedY << "," << loadedZ << ")\n";
-        sanitizeLoadedSpawn(loadedX, loadedY, loadedZ);
-    } else {
-        unsigned int rseed = (unsigned int)time(nullptr);
-        std::cout << "[World] No saved world, random seed=" << rseed << "\n";
-        setNoiseSeed(rseed);
-        srand(rseed);
-        loadedSeed = (int)rseed;
-        findSafeSpawn(loadedX, loadedY, loadedZ);
+    if(wipeSaveFile) {
+        std::remove("saved_world.txt");
     }
+}
 
+static void requestInitialChunks(int spawnChunkX, int spawnChunkZ) {
+    for(int cx = spawnChunkX - renderDistance; cx <= spawnChunkX + renderDistance; cx++){
+        for(int cz = spawnChunkZ - renderDistance; cz <= spawnChunkZ + renderDistance; cz++){
+            requestChunkAsync(cx, cz);
+        }
+    }
+}
+
+static int countLoadedInitialChunks(int spawnChunkX, int spawnChunkZ) {
+    int loaded = 0;
+    for(int cx = spawnChunkX - renderDistance; cx <= spawnChunkX + renderDistance; cx++){
+        for(int cz = spawnChunkZ - renderDistance; cz <= spawnChunkZ + renderDistance; cz++){
+            if(chunks.find({cx,cz}) != chunks.end())
+                loaded++;
+        }
+    }
+    return loaded;
+}
+
+// -------------------- MAIN --------------------
+int main(int, char**) {
     if(SDL_Init(SDL_INIT_VIDEO) < 0) {
         std::cerr << "SDL_Init Error: " << SDL_GetError() << "\n";
         return -1;
@@ -1254,6 +1426,7 @@ int main(int, char**) {
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
+    // Shaders + textures
     worldShader = createShaderProgram(worldVertSrc, worldFragSrc);
     texID = loadTexture("texture.png");
     if(!texID) {
@@ -1273,12 +1446,28 @@ int main(int, char**) {
         return -1;
     }
 
+    // Background image for menu/loading
+    bgTex = loadTexture("BG.png");
+    if(!bgTex) {
+        std::cerr << "BG.png failed to load!\n";
+        SDL_GL_DeleteContext(glContext);
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return -1;
+    }
+
     initUI();
     Inventory inventory;
 
+    // Worker thread runs always, but NO JOBS are posted until New/Load is pressed.
     std::thread worker(chunkWorkerThread);
 
-    Vec3 playerFeet = {loadedX, loadedY, loadedZ};
+    // Game state
+    GameState state = GameState::MENU;
+
+    // Gameplay state vars (initialized once we start game)
+    int worldSeed = 0;
+    Vec3 playerFeet = {0, 40, 0};
 
     Camera camera;
     camera.yaw = -3.14f/2;
@@ -1287,37 +1476,118 @@ int main(int, char**) {
 
     bool paused = false;
     bool isFlying = false;
-    bool showDevOverlay = false; // <-- F3 toggles this
+    bool showDevOverlay = false;
     float verticalVelocity = 0.0f;
     float tickAccumulator = 0.0f;
 
-    int spawnChunkX = (int)std::floor(playerFeet.x / (float)chunkSize);
-    int spawnChunkZ = (int)std::floor(playerFeet.z / (float)chunkSize);
+    Mat4 projWorld = perspectiveMatrix(45.0f*(3.14159f/180.0f),
+        (float)SCREEN_WIDTH/(float)SCREEN_HEIGHT,
+        0.1f, 140.0f);
 
-    for(int cx = spawnChunkX - renderDistance; cx <= spawnChunkX + renderDistance; cx++){
-        for(int cz = spawnChunkZ - renderDistance; cz <= spawnChunkZ + renderDistance; cz++){
-            requestChunkAsync(cx, cz);
-        }
-    }
+    // Loading progress tracking
+    int loadingSpawnCX = 0;
+    int loadingSpawnCZ = 0;
+    const int totalInitialChunks = (2*renderDistance + 1) * (2*renderDistance + 1);
+    float loadingProgress = 0.0f;
 
-    SDL_SetRelativeMouseMode(SDL_TRUE);
+    // Menu buttons
+    float btnW = 320.0f;
+    float btnH = 64.0f;
+    float centerX = (SCREEN_WIDTH - btnW) * 0.5f;
+    float startY = (SCREEN_HEIGHT * 0.5f) + 40.0f;
+
+    UIButton btnNew  { centerX, startY,           btnW, btnH, "NEW GAME" };
+    UIButton btnLoad { centerX, startY - 90.0f,   btnW, btnH, "LOAD GAME" };
+    UIButton btnQuit { centerX, startY - 180.0f,  btnW, btnH, "QUIT GAME" };
+
+    SDL_SetRelativeMouseMode(SDL_FALSE);
 
     Uint32 lastTime = SDL_GetTicks();
     bool running = true;
     SDL_Event ev;
 
-    Mat4 projWorld = perspectiveMatrix(45.0f*(3.14159f/180.0f),
-        (float)SCREEN_WIDTH/(float)SCREEN_HEIGHT,
-        0.1f, 140.0f);
+    auto beginNewGame = [&](){
+        resetWorldData(true);
+
+        unsigned int rseed = (unsigned int)time(nullptr);
+        worldSeed = (int)rseed;
+        setNoiseSeed(rseed);
+        srand(rseed);
+
+        float sx=0, sy=40, sz=0;
+        findSafeSpawn(sx, sy, sz);
+        playerFeet = {sx, sy, sz};
+
+        camera.yaw = -3.14f/2;
+        camera.pitch = 0.0f;
+        camera.position = {playerFeet.x, playerFeet.y + EYE_HEIGHT, playerFeet.z};
+
+        paused = false;
+        isFlying = false;
+        showDevOverlay = false;
+        verticalVelocity = 0.0f;
+        tickAccumulator = 0.0f;
+        if(inventory.isOpen()) inventory.toggle();
+
+        loadingSpawnCX = (int)std::floor(playerFeet.x / (float)chunkSize);
+        loadingSpawnCZ = (int)std::floor(playerFeet.z / (float)chunkSize);
+
+        requestInitialChunks(loadingSpawnCX, loadingSpawnCZ);
+        loadingProgress = 0.0f;
+
+        state = GameState::LOADING;
+    };
+
+    auto beginLoadGame = [&](){
+        resetWorldData(false);
+
+        float lx=0, ly=40, lz=0;
+        int lseed=0;
+        bool ok=false;
+        {
+            std::lock_guard<std::mutex> lk(gWorldMutex);
+            ok = loadWorld("saved_world.txt", lseed, lx, ly, lz);
+        }
+
+        if(!ok) {
+            // If no save exists, fallback to new game behavior
+            beginNewGame();
+            return;
+        }
+
+        worldSeed = lseed;
+        setNoiseSeed((unsigned int)worldSeed);
+        srand((unsigned int)worldSeed);
+
+        sanitizeLoadedSpawn(lx, ly, lz);
+        playerFeet = {lx, ly, lz};
+
+        camera.yaw = -3.14f/2;
+        camera.pitch = 0.0f;
+        camera.position = {playerFeet.x, playerFeet.y + EYE_HEIGHT, playerFeet.z};
+
+        paused = false;
+        isFlying = false;
+        showDevOverlay = false;
+        verticalVelocity = 0.0f;
+        tickAccumulator = 0.0f;
+        if(inventory.isOpen()) inventory.toggle();
+
+        loadingSpawnCX = (int)std::floor(playerFeet.x / (float)chunkSize);
+        loadingSpawnCZ = (int)std::floor(playerFeet.z / (float)chunkSize);
+
+        requestInitialChunks(loadingSpawnCX, loadingSpawnCZ);
+        loadingProgress = 0.0f;
+
+        state = GameState::LOADING;
+    };
 
     while(running) {
         Uint32 now = SDL_GetTicks();
         float dt = (now - lastTime) * 0.001f;
         lastTime = now;
 
-        camera.position = {playerFeet.x, playerFeet.y + EYE_HEIGHT, playerFeet.z};
-
-        // Upload a couple chunks per frame to reduce stutter
+        // Always drain uploads (used by loading screen progress)
         int uploadsThisFrame = 0;
         while(uploadsThisFrame < MAX_CHUNK_UPLOADS_PER_FRAME) {
             ChunkResult res;
@@ -1341,219 +1611,312 @@ int main(int, char**) {
             uploadsThisFrame++;
         }
 
-        // Water tick
-        tickAccumulator += dt;
-        while(tickAccumulator >= TICK_INTERVAL) {
-            tickAccumulator -= TICK_INTERVAL;
-            updateWaterFlow(camera, dt);
-        }
-
+        // Events
         while(SDL_PollEvent(&ev)) {
             if(ev.type == SDL_QUIT) running = false;
 
-            if(ev.type == SDL_KEYDOWN) {
-                if(ev.key.keysym.sym == SDLK_F3) {
-                    showDevOverlay = !showDevOverlay; // <-- toggle overlay
+            if(state == GameState::MENU) {
+                if(ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_ESCAPE) {
+                    running = false;
                 }
-                else if(ev.key.keysym.sym == SDLK_ESCAPE) {
-                    if(inventory.isOpen()) inventory.toggle();
-                    paused = !paused;
-                    SDL_SetRelativeMouseMode(paused ? SDL_FALSE : SDL_TRUE);
-                }
-                else if(ev.key.keysym.sym == SDLK_e) {
-                    inventory.toggle();
-                    SDL_SetRelativeMouseMode(inventory.isOpen() ? SDL_FALSE : SDL_TRUE);
-                }
-                else if(!paused && !inventory.isOpen() && !isFlying && ev.key.keysym.sym == SDLK_SPACE) {
-                    Vec3 testFeet = playerFeet;
-                    testFeet.y -= 0.05f;
-                    if(checkCollisionFeet(testFeet)) verticalVelocity = JUMP_SPEED;
-                }
-                else if(ev.key.keysym.sym == SDLK_f) {
-                    isFlying = !isFlying;
-                    verticalVelocity = 0.0f;
+
+                if(ev.type == SDL_MOUSEBUTTONDOWN && ev.button.button == SDL_BUTTON_LEFT) {
+                    int mx, my;
+                    SDL_GetMouseState(&mx, &my);
+                    float ux = (float)mx;
+                    float uy = (float)(SCREEN_HEIGHT - my);
+
+                    if(pointInRect(ux, uy, btnNew)) {
+                        beginNewGame();
+                    } else if(pointInRect(ux, uy, btnLoad)) {
+                        beginLoadGame();
+                    } else if(pointInRect(ux, uy, btnQuit)) {
+                        running = false;
+                    }
                 }
             }
-
-            if(!paused && !inventory.isOpen()) {
-                if(ev.type == SDL_MOUSEMOTION) {
-                    float sensitivity = 0.0025f;
-                    camera.yaw   += ev.motion.xrel * sensitivity;
-                    camera.pitch -= ev.motion.yrel * sensitivity;
-                    camera.pitch = clampf(camera.pitch, -1.5f, 1.5f);
+            else if(state == GameState::LOADING) {
+                // Block input during loading
+                if(ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_ESCAPE) {
+                    // allow cancel back to menu
+                    resetWorldData(false);
+                    state = GameState::MENU;
+                    SDL_SetRelativeMouseMode(SDL_FALSE);
                 }
             }
-
-            // block breaking/placing
-            if(!paused && !inventory.isOpen() && ev.type == SDL_MOUSEBUTTONDOWN) {
-                Vec3 forward = {
-                    cosf(camera.pitch) * cosf(camera.yaw),
-                    sinf(camera.pitch),
-                    cosf(camera.pitch) * sinf(camera.yaw)
-                };
-
-                int bx, by, bz;
-                if(!raycastBlock(camera.position, forward, 6.0f, bx, by, bz))
-                    continue;
-
-                if(ev.button.button == SDL_BUTTON_LEFT) {
-                    std::lock_guard<std::mutex> lk(gWorldMutex);
-                    extraBlocks[{bx, by, bz}] = (BlockType)-1;
-                    int ccx, ccz; getChunkCoords(bx, bz, ccx, ccz);
-                    rebuildChunkAsync(ccx, ccz);
+            else if(state == GameState::PLAYING) {
+                if(ev.type == SDL_KEYDOWN) {
+                    if(ev.key.keysym.sym == SDLK_F3) {
+                        showDevOverlay = !showDevOverlay;
+                    } else if(ev.key.keysym.sym == SDLK_ESCAPE) {
+                        if(inventory.isOpen()) {
+                            inventory.toggle();
+                            SDL_SetRelativeMouseMode(SDL_TRUE);
+                        } else {
+                            paused = !paused;
+                            SDL_SetRelativeMouseMode(paused ? SDL_FALSE : SDL_TRUE);
+                        }
+                    } else if(ev.key.keysym.sym == SDLK_e) {
+                        if(!paused) {
+                            inventory.toggle();
+                            SDL_SetRelativeMouseMode(inventory.isOpen() ? SDL_FALSE : SDL_TRUE);
+                        }
+                    } else if(!paused && !inventory.isOpen() && !isFlying && ev.key.keysym.sym == SDLK_SPACE) {
+                        Vec3 testFeet = playerFeet;
+                        testFeet.y -= 0.05f;
+                        if(checkCollisionFeet(testFeet)) verticalVelocity = JUMP_SPEED;
+                    } else if(ev.key.keysym.sym == SDLK_f) {
+                        isFlying = !isFlying;
+                        verticalVelocity = 0.0f;
+                    }
                 }
-                else if(ev.button.button == SDL_BUTTON_RIGHT) {
-                    Vec3 hitPos = { (float)bx + 0.5f, (float)by + 0.5f, (float)bz + 0.5f };
-                    Vec3 diff = subtract(hitPos, camera.position);
 
-                    int px=bx, py=by, pz=bz;
-                    float ax = fabs(diff.x), ay = fabs(diff.y), az = fabs(diff.z);
-                    if(ax > ay && ax > az) px += (diff.x > 0) ? -1 : 1;
-                    else if(ay > ax && ay > az) py += (diff.y > 0) ? -1 : 1;
-                    else pz += (diff.z > 0) ? -1 : 1;
+                if(!paused && !inventory.isOpen()) {
+                    if(ev.type == SDL_MOUSEMOTION) {
+                        float sensitivity = 0.0025f;
+                        camera.yaw   += ev.motion.xrel * sensitivity;
+                        camera.pitch -= ev.motion.yrel * sensitivity;
+                        camera.pitch = clampf(camera.pitch, -1.5f, 1.5f);
+                    }
+                }
 
-                    int blockToPlace = inventory.getSelectedBlock();
-                    if(blockToPlace != (int)BLOCK_NONE) {
-                        Vec3 pos = playerFeet;
-                        float half = playerWidth * 0.5f;
-                        float minX = pos.x - half, maxX = pos.x + half;
-                        float minY = pos.y,        maxY = pos.y + playerHeight;
-                        float minZ = pos.z - half, maxZ = pos.z + half;
+                if(!paused && !inventory.isOpen() && ev.type == SDL_MOUSEBUTTONDOWN) {
+                    Vec3 forward = {
+                        cosf(camera.pitch) * cosf(camera.yaw),
+                        sinf(camera.pitch),
+                        cosf(camera.pitch) * sinf(camera.yaw)
+                    };
 
-                        if(!(px + 1 > minX && px < maxX &&
-                             py + 1 > minY && py < maxY &&
-                             pz + 1 > minZ && pz < maxZ)) {
+                    int bx, by, bz;
+                    if(!raycastBlock(camera.position, forward, 6.0f, bx, by, bz))
+                        continue;
 
-                            std::lock_guard<std::mutex> lk(gWorldMutex);
-                            extraBlocks[{px, py, pz}] = (BlockType)blockToPlace;
-                            int ccx, ccz; getChunkCoords(px, pz, ccx, ccz);
-                            rebuildChunkAsync(ccx, ccz);
+                    if(ev.button.button == SDL_BUTTON_LEFT) {
+                        std::lock_guard<std::mutex> lk(gWorldMutex);
+                        extraBlocks[{bx, by, bz}] = (BlockType)-1;
+                        int ccx, ccz; getChunkCoords(bx, bz, ccx, ccz);
+                        rebuildChunkAsync(ccx, ccz);
+                    }
+                    else if(ev.button.button == SDL_BUTTON_RIGHT) {
+                        Vec3 hitPos = { (float)bx + 0.5f, (float)by + 0.5f, (float)bz + 0.5f };
+                        Vec3 diff = subtract(hitPos, camera.position);
+
+                        int px=bx, py=by, pz=bz;
+                        float ax = fabs(diff.x), ay = fabs(diff.y), az = fabs(diff.z);
+                        if(ax > ay && ax > az) px += (diff.x > 0) ? -1 : 1;
+                        else if(ay > ax && ay > az) py += (diff.y > 0) ? -1 : 1;
+                        else pz += (diff.z > 0) ? -1 : 1;
+
+                        int blockToPlace = inventory.getSelectedBlock();
+                        if(blockToPlace != (int)BLOCK_NONE) {
+                            Vec3 pos = playerFeet;
+                            float half = playerWidth * 0.5f;
+                            float minX = pos.x - half, maxX = pos.x + half;
+                            float minY = pos.y,        maxY = pos.y + playerHeight;
+                            float minZ = pos.z - half, maxZ = pos.z + half;
+
+                            if(!(px + 1 > minX && px < maxX &&
+                                 py + 1 > minY && py < maxY &&
+                                 pz + 1 > minZ && pz < maxZ)) {
+
+                                std::lock_guard<std::mutex> lk(gWorldMutex);
+                                extraBlocks[{px, py, pz}] = (BlockType)blockToPlace;
+                                int ccx, ccz; getChunkCoords(px, pz, ccx, ccz);
+                                rebuildChunkAsync(ccx, ccz);
+                            }
                         }
                     }
                 }
             }
         }
 
-        // Movement
-        const Uint8* keys = SDL_GetKeyboardState(nullptr);
+        // Logic
+        if(state == GameState::LOADING) {
+            int loaded = countLoadedInitialChunks(loadingSpawnCX, loadingSpawnCZ);
+            loadingProgress = (float)loaded / (float)totalInitialChunks;
 
-        Vec3 forward = {
-            cosf(camera.pitch) * cosf(camera.yaw),
-            sinf(camera.pitch),
-            cosf(camera.pitch) * sinf(camera.yaw)
-        };
-        Vec3 right = {
-            cosf(camera.yaw + 3.14159f/2.0f),
-            0.0f,
-            sinf(camera.yaw + 3.14159f/2.0f)
-        };
-
-        Vec3 move = {0,0,0};
-        float speed = keys[SDL_SCANCODE_LSHIFT] ? 8.0f : 5.0f;
-
-        if(!inventory.isOpen()){
-            if(keys[SDL_SCANCODE_W]) { move.x += forward.x; move.z += forward.z; }
-            if(keys[SDL_SCANCODE_S]) { move.x -= forward.x; move.z -= forward.z; }
-            if(keys[SDL_SCANCODE_A]) { move.x -= right.x;   move.z -= right.z;   }
-            if(keys[SDL_SCANCODE_D]) { move.x += right.x;   move.z += right.z;   }
-        }
-
-        float len = sqrtf(move.x*move.x + move.z*move.z);
-        if(len > 0.0001f) { move.x/=len; move.z/=len; }
-
-        Vec3 newFeet = playerFeet;
-
-        newFeet.x += move.x * speed * dt;
-        if(checkCollisionFeet(newFeet)) newFeet.x = playerFeet.x;
-
-        newFeet.z += move.z * speed * dt;
-        if(checkCollisionFeet(newFeet)) newFeet.z = playerFeet.z;
-
-        if(isFlying) {
-            if(!inventory.isOpen()){
-                if(keys[SDL_SCANCODE_SPACE]) newFeet.y += speed * dt;
-                if(keys[SDL_SCANCODE_LCTRL]) newFeet.y -= speed * dt;
-            }
-            verticalVelocity = 0.0f;
-        } else {
-            verticalVelocity += GRAVITY * dt;
-            float targetY = newFeet.y + verticalVelocity * dt;
-            float startY  = newFeet.y;
-            float stepY   = (targetY > startY) ? 0.05f : -0.05f;
-
-            float y = startY;
-            while((stepY > 0.0f && y < targetY) || (stepY < 0.0f && y > targetY)) {
-                float nextY = y + stepY;
-                if(stepY > 0.0f && nextY > targetY) nextY = targetY;
-                if(stepY < 0.0f && nextY < targetY) nextY = targetY;
-
-                Vec3 testPos = newFeet;
-                testPos.y = nextY;
-
-                if(checkCollisionFeet(testPos)) { verticalVelocity = 0.0f; break; }
-                y = nextY;
-            }
-            newFeet.y = y;
-        }
-
-        if(newFeet.y < WORLD_FLOOR_LIMIT) {
-            float rx = newFeet.x, ry = newFeet.y, rz = newFeet.z;
-            sanitizeLoadedSpawn(rx, ry, rz);
-            newFeet.x = rx; newFeet.y = ry; newFeet.z = rz;
-            verticalVelocity = 0.0f;
-        }
-
-        playerFeet = newFeet;
-        camera.position = {playerFeet.x, playerFeet.y + EYE_HEIGHT, playerFeet.z};
-
-        // Request chunks around player
-        int pcx = (int)std::floor(playerFeet.x / (float)chunkSize);
-        int pcz = (int)std::floor(playerFeet.z / (float)chunkSize);
-        for(int cx = pcx - renderDistance; cx <= pcx + renderDistance; cx++){
-            for(int cz = pcz - renderDistance; cz <= pcz + renderDistance; cz++){
-                requestChunkAsync(cx, cz);
+            if(loaded >= totalInitialChunks) {
+                // Switch into gameplay
+                state = GameState::PLAYING;
+                SDL_SetRelativeMouseMode(SDL_TRUE);
             }
         }
 
-        inventory.update(dt, camera);
+        if(state == GameState::PLAYING) {
+            camera.position = {playerFeet.x, playerFeet.y + EYE_HEIGHT, playerFeet.z};
+
+            tickAccumulator += dt;
+            while(tickAccumulator >= TICK_INTERVAL) {
+                tickAccumulator -= TICK_INTERVAL;
+                updateWaterFlow(camera, dt);
+            }
+
+            const Uint8* keys = SDL_GetKeyboardState(nullptr);
+
+            Vec3 forward = {
+                cosf(camera.pitch) * cosf(camera.yaw),
+                sinf(camera.pitch),
+                cosf(camera.pitch) * sinf(camera.yaw)
+            };
+            Vec3 right = {
+                cosf(camera.yaw + 3.14159f/2.0f),
+                0.0f,
+                sinf(camera.yaw + 3.14159f/2.0f)
+            };
+
+            Vec3 move = {0,0,0};
+            float speed = keys[SDL_SCANCODE_LSHIFT] ? 8.0f : 5.0f;
+
+            if(!paused && !inventory.isOpen()){
+                if(keys[SDL_SCANCODE_W]) { move.x += forward.x; move.z += forward.z; }
+                if(keys[SDL_SCANCODE_S]) { move.x -= forward.x; move.z -= forward.z; }
+                if(keys[SDL_SCANCODE_A]) { move.x -= right.x;   move.z -= right.z;   }
+                if(keys[SDL_SCANCODE_D]) { move.x += right.x;   move.z += right.z;   }
+            }
+
+            float len = sqrtf(move.x*move.x + move.z*move.z);
+            if(len > 0.0001f) { move.x/=len; move.z/=len; }
+
+            Vec3 newFeet = playerFeet;
+
+            if(!paused && !inventory.isOpen()) {
+                newFeet.x += move.x * speed * dt;
+                if(checkCollisionFeet(newFeet)) newFeet.x = playerFeet.x;
+
+                newFeet.z += move.z * speed * dt;
+                if(checkCollisionFeet(newFeet)) newFeet.z = playerFeet.z;
+
+                if(isFlying) {
+                    if(keys[SDL_SCANCODE_SPACE]) newFeet.y += speed * dt;
+                    if(keys[SDL_SCANCODE_LCTRL]) newFeet.y -= speed * dt;
+                    verticalVelocity = 0.0f;
+                } else {
+                    verticalVelocity += GRAVITY * dt;
+                    float targetY = newFeet.y + verticalVelocity * dt;
+                    float startY  = newFeet.y;
+                    float stepY   = (targetY > startY) ? 0.05f : -0.05f;
+
+                    float y = startY;
+                    while((stepY > 0.0f && y < targetY) || (stepY < 0.0f && y > targetY)) {
+                        float nextY = y + stepY;
+                        if(stepY > 0.0f && nextY > targetY) nextY = targetY;
+                        if(stepY < 0.0f && nextY < targetY) nextY = targetY;
+
+                        Vec3 testPos = newFeet;
+                        testPos.y = nextY;
+
+                        if(checkCollisionFeet(testPos)) { verticalVelocity = 0.0f; break; }
+                        y = nextY;
+                    }
+                    newFeet.y = y;
+                }
+
+                if(newFeet.y < WORLD_FLOOR_LIMIT) {
+                    float rx = newFeet.x, ry = newFeet.y, rz = newFeet.z;
+                    sanitizeLoadedSpawn(rx, ry, rz);
+                    newFeet.x = rx; newFeet.y = ry; newFeet.z = rz;
+                    verticalVelocity = 0.0f;
+                }
+
+                playerFeet = newFeet;
+            }
+
+            camera.position = {playerFeet.x, playerFeet.y + EYE_HEIGHT, playerFeet.z};
+
+            // Request chunks around player
+            int pcx = (int)std::floor(playerFeet.x / (float)chunkSize);
+            int pcz = (int)std::floor(playerFeet.z / (float)chunkSize);
+            for(int cx = pcx - renderDistance; cx <= pcx + renderDistance; cx++){
+                for(int cz = pcz - renderDistance; cz <= pcz + renderDistance; cz++){
+                    requestChunkAsync(cx, cz);
+                }
+            }
+
+            // Inventory logic
+            inventory.update(dt, camera);
+        }
 
         // Render
         glViewport(0,0,SCREEN_WIDTH,SCREEN_HEIGHT);
         glClearColor(0.55f,0.75f,1.0f,1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        Mat4 view = lookAtMatrix(camera.position, add(camera.position, forward), {0,1,0});
-        renderChunks(view, projWorld, camera.position);
+        if(state == GameState::MENU) {
+            uiDrawFullscreenTexture(bgTex);
 
-        // Dev overlay (F3)
-        glDisable(GL_DEPTH_TEST);
-        drawDevOverlay(showDevOverlay, playerFeet);
-        glEnable(GL_DEPTH_TEST);
+            glDisable(GL_DEPTH_TEST);
+            glEnable(GL_BLEND);
+
+            // Title
+            float scale = 4.0f;
+            std::string title = "C-CRAFT";
+            float tw = (float)title.size() * 6.0f * scale;
+            uiDrawText((SCREEN_WIDTH - tw)*0.5f, SCREEN_HEIGHT - 90.0f, title, scale, 1,1,1,1, true);
+
+            // Buttons
+            int mx, my;
+            SDL_GetMouseState(&mx, &my);
+            float ux = (float)mx;
+            float uy = (float)(SCREEN_HEIGHT - my);
+
+            drawButton(btnNew,  pointInRect(ux, uy, btnNew));
+            drawButton(btnLoad, pointInRect(ux, uy, btnLoad));
+            drawButton(btnQuit, pointInRect(ux, uy, btnQuit));
+
+            glEnable(GL_DEPTH_TEST);
+        }
+        else if(state == GameState::LOADING) {
+            glDisable(GL_DEPTH_TEST);
+            drawLoadingScreen(loadingProgress);
+            glEnable(GL_DEPTH_TEST);
+        }
+        else if(state == GameState::PLAYING) {
+            Vec3 forward = {
+                cosf(camera.pitch) * cosf(camera.yaw),
+                sinf(camera.pitch),
+                cosf(camera.pitch) * sinf(camera.yaw)
+            };
+            Mat4 view = lookAtMatrix(camera.position, add(camera.position, forward), {0,1,0});
+            renderChunks(view, projWorld, camera.position);
+
+            // UI phase
+            glDisable(GL_DEPTH_TEST);
+
+            if(inventory.isOpen()) {
+                inventory.render();
+            }
+            if(paused) {
+                drawPauseOverlay(true);
+            }
+            drawDevOverlay(showDevOverlay, playerFeet);
+
+            glEnable(GL_DEPTH_TEST);
+        }
 
         SDL_GL_SwapWindow(window);
     }
 
-    // Save
-    {
+    // Save only if we were in a started world (LOADING or PLAYING means a seed exists)
+    if(state != GameState::MENU) {
         std::lock_guard<std::mutex> lk(gWorldMutex);
-        saveWorld("saved_world.txt", loadedSeed, playerFeet.x, playerFeet.y, playerFeet.z);
+        saveWorld("saved_world.txt", worldSeed, playerFeet.x, playerFeet.y, playerFeet.z);
     }
 
-    // Shutdown worker
     gWorkerRunning.store(false);
     gJobCV.notify_all();
     if(worker.joinable()) worker.join();
 
-    // Cleanup
+    clearChunkGPU();
+
     glDeleteProgram(worldShader);
     glDeleteProgram(uiShader);
+    glDeleteProgram(uiTexShader);
+
     glDeleteVertexArrays(1, &uiVAO);
     glDeleteBuffers(1, &uiVBO);
 
-    for(auto &kv : chunks) {
-        glDeleteVertexArrays(1, &kv.second.VAO);
-        glDeleteBuffers(1, &kv.second.VBO);
-    }
+    glDeleteVertexArrays(1, &uiTexVAO);
+    glDeleteBuffers(1, &uiTexVBO);
 
     SDL_GL_DeleteContext(glContext);
     SDL_DestroyWindow(window);
