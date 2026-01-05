@@ -1088,14 +1088,91 @@ static bool raycastBlock(const Vec3 &start, const Vec3 &dir, float maxDist, int 
 }
 
 // -------------------- WATER FLOW --------------------
-bool canWaterFlowInto(int x, int y, int z) {
+// NOTE: All helpers below assume the caller holds gWorldMutex.
+static bool isCarvedOverrideAtLocked(int x, int y, int z)
+{
+    auto it = extraBlocks.find({x, y, z});
+    return (it != extraBlocks.end() && (int)it->second < 0);
+}
+
+static bool isSolidOverrideAtLocked(int x, int y, int z)
+{
+    auto it = extraBlocks.find({x, y, z});
+    return (it != extraBlocks.end() && (int)it->second >= 0);
+}
+
+// Procedural (naturally generated) water is not stored in waterLevels.
+// This helper detects whether a cell *should* be filled with natural water.
+static bool isProceduralWaterCellLocked(int x, int y, int z)
+{
+    // Solid placed overrides replace water.
+    if(isSolidOverrideAtLocked(x, y, z))
+        return false;
+
+    // Explicit water replaces procedural water at that cell.
+    if(waterLevels.find({x, y, z}) != waterLevels.end())
+        return false;
+
+    Biome b = getBiome(x, z);
+    int surfaceY = (b == BIOME_EXTREME_HILLS) ? getExtremeHillsBase(x, z) : getHeight2D(x, z, b);
+
+    // Match the same rule used when rendering procedural water.
+    bool allowWaterFill = true;
+    if(b == BIOME_DESERT && !nearOcean(x, z)) allowWaterFill = false;
+    if(!allowWaterFill) return false;
+
+    if(!(b == BIOME_OCEAN || b == BIOME_SWAMP || surfaceY < SEA_LEVEL))
+        return false;
+
+    return (y >= surfaceY + 1 && y <= SEA_LEVEL);
+}
+
+// Public helper (declared in world.h): true only if the cell is empty air.
+// This is used for water face culling: water should only render faces
+// when adjacent to air (not when adjacent to solid blocks or other water).
+bool isAirBlockAt(int bx, int by, int bz)
+{
+    std::lock_guard<std::mutex> lk(gWorldMutex);
+
+    std::tuple<int,int,int> key = {bx, by, bz};
+
+    // Explicit overrides: carved is air; solid is not air.
+    auto it = extraBlocks.find(key);
+    if(it != extraBlocks.end())
+        return ((int)it->second < 0);
+
+    // Any explicit water is not air.
+    if(waterLevels.find(key) != waterLevels.end())
+        return false;
+
+    // Procedural (natural) water is not air.
+    if(isProceduralWaterCellLocked(bx, by, bz))
+        return false;
+
+    // Otherwise, air if not solid terrain.
+    return !isSolidBlock(bx, by, bz);
+}
+
+// Returns true if the cell can be filled by flowing water (air or carved space).
+bool canWaterFlowInto(int x, int y, int z)
+{
     std::tuple<int,int,int> key = {x, y, z};
-    if(extraBlocks.find(key) != extraBlocks.end())
+
+    // Solid override blocks water; carved override (-1) is empty space.
+    auto it = extraBlocks.find(key);
+    if(it != extraBlocks.end() && (int)it->second >= 0)
+        return false;
+
+    // Don't flow into a cell that already has explicit water.
+    if(waterLevels.find(key) != waterLevels.end())
         return false;
 
     int terrainHeight = surfaceYAt(x, z);
-    if(y <= terrainHeight)
-        return false;
+    if(y <= terrainHeight) {
+        // Inside natural terrain is blocked unless the player carved it out.
+        if(!isCarvedOverrideAtLocked(x, y, z))
+            return false;
+    }
 
     return true;
 }
@@ -2191,11 +2268,53 @@ int main(int, char**) {
                         continue;
 
                     if(ev.button.button == SDL_BUTTON_LEFT) {
-                        std::lock_guard<std::mutex> lk(gWorldMutex);
-                        waterLevels.erase({bx, by, bz});
-                        extraBlocks[{bx, by, bz}] = (BlockType)-1;
+                        // Break block -> carve it out, and if it's adjacent to naturally generated water,
+                        // convert that nearby natural water into an explicit source so it can spread.
+                        std::unordered_set<long long> rebuildChunks;
+                        {
+                            std::lock_guard<std::mutex> lk(gWorldMutex);
+
+                            // Remove any explicit water at the broken cell
+                            waterLevels.erase({bx, by, bz});
+
+                            // Carve the block (air)
+                            extraBlocks[{bx, by, bz}] = (BlockType)-1;
+
+                            // If any neighbor is *procedural* water, seed it into waterLevels as a source.
+                            // This makes oceans/lakes behave like placed water when terrain is modified.
+                            static const int dirs[6][3] = {
+                                { 1, 0, 0}, {-1, 0, 0},
+                                { 0, 1, 0}, { 0,-1, 0},
+                                { 0, 0, 1}, { 0, 0,-1}
+                            };
+
+                            for(int di = 0; di < 6; di++) {
+                                int nx = bx + dirs[di][0];
+                                int ny = by + dirs[di][1];
+                                int nz = bz + dirs[di][2];
+
+                                if(isProceduralWaterCellLocked(nx, ny, nz)) {
+                                    std::tuple<int,int,int> nk = {nx, ny, nz};
+                                    auto itW = waterLevels.find(nk);
+                                    if(itW == waterLevels.end() || itW->second < 8) {
+                                        waterLevels[nk] = 8;
+                                        int rcx, rcz; getChunkCoords(nx, nz, rcx, rcz);
+                                        rebuildChunks.insert(packChunkKey(rcx, rcz));
+                                    }
+                                }
+                            }
+                        }
+
+                        // Rebuild the broken block's chunk
                         int ccx, ccz; getChunkCoords(bx, bz, ccx, ccz);
                         rebuildChunkAsync(ccx, ccz);
+
+                        // Rebuild any chunks where we seeded natural-water sources
+                        for(long long packed : rebuildChunks) {
+                            int rcx = (int)(packed >> 32);
+                            int rcz = (int)(unsigned int)(packed & 0xffffffffLL);
+                            rebuildChunkAsync(rcx, rcz);
+                        }
                     }
                     else if(ev.button.button == SDL_BUTTON_RIGHT) {
                         Vec3 hitPos = { (float)bx + 0.5f, (float)by + 0.5f, (float)bz + 0.5f };

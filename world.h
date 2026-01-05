@@ -26,4 +26,8 @@ bool isSolidBlock(int bx, int by, int bz);
 // Returns true if there is water (any level 1–8) at the given coordinates.
 bool isWaterBlockAt(int bx, int by, int bz);
 
+// Returns true if the cell is empty air (no solid block and no water).
+// Used for water face culling.
+bool isAirBlockAt(int bx, int by, int bz);
+
 #endif
