@@ -94,12 +94,6 @@ static int gHotbar[10];          // indices 0..9, values are BlockType ints (or 
 static int gSelectedSlot = 0;    // 0..9
 static int gLastInventorySelected = BLOCK_NONE;
 
-// Forward declarations (UI draw helpers call these before their definitions later in the file)
-static void hotbarSelectSlot(int slot);
-static void hotbarScroll(int dir);
-static void hotbarAssignSelectedBlock(int blockID);
-static int  hotbarGetActiveBlock();
-
 // -------------------- HELPERS --------------------
 static float clampf(float v, float a, float b) { return std::max(a, std::min(b, v)); }
 
@@ -430,6 +424,37 @@ static void uiDrawTexturedRect(GLuint tex, float x, float y, float w, float h) {
     glDrawArrays(GL_TRIANGLES, 0, 6);
     glBindVertexArray(0);
 }
+
+static void uiDrawTexturedRectUV(GLuint tex, float x, float y, float w, float h,
+                                 float u0, float v0, float u1, float v1) {
+    if(!tex) return;
+
+    float v[24] = {
+        // pos      // uv
+        x,   y,     u0, v0,
+        x+w, y,     u1, v0,
+        x+w, y+h,   u1, v1,
+
+        x,   y,     u0, v0,
+        x+w, y+h,   u1, v1,
+        x,   y+h,   u0, v1
+    };
+
+    glUseProgram(uiTexShader2D);
+    Mat4 proj = orthoPixels(SCREEN_WIDTH, SCREEN_HEIGHT);
+    glUniformMatrix4fv(glGetUniformLocation(uiTexShader2D, "uProj"), 1, GL_FALSE, proj.m);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glUniform1i(glGetUniformLocation(uiTexShader2D, "uTex"), 0);
+
+    glBindVertexArray(uiTexVAO2D);
+    glBindBuffer(GL_ARRAY_BUFFER, uiTexVBO2D);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(v), v);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+}
+
 
 // -------------------- 5x7 DEV FONT --------------------
 static void glyph5x7(char c, uint8_t outRows[7]) {
@@ -1452,6 +1477,26 @@ static void drawMiniBlockPreview(int blockID, float x, float y, float sizePx) {
 }
 
 // -------------------- HUD HOTBAR DRAW --------------------
+
+static void drawHotbarBlockIcon2D(int blockID, float x, float y, float slotSize) {
+    if(blockID == BLOCK_NONE) return;
+
+    float uv[4][2];
+    if(!getBlockIconUV((BlockType)blockID, uv)) return;
+
+    // Inset inside the frame (similar to Minecraft hotbar)
+    float inset = std::max(4.0f, slotSize * 0.16f);
+    float ix = x + inset;
+    float iy = y + inset;
+    float is = slotSize - inset * 2.0f;
+    if(is < 4.0f) is = slotSize;
+
+    // uv[0] = lower-left, uv[2] = upper-right
+    uiDrawTexturedRectUV(texID, ix, iy, is, is,
+                         uv[0][0], uv[0][1],
+                         uv[2][0], uv[2][1]);
+}
+
 static void drawHotbarHUD() {
     // Only draw slots 1..9 frames. Slot 0 is "none".
     const float slotSize = 52.0f;
@@ -1478,12 +1523,12 @@ static void drawHotbarHUD() {
         // Draw frame texture
         uiDrawTexturedRect(frameTex, x, y, slotSize, slotSize);
 
-        // Draw mini cube for this slot, if not empty
+        // Draw static 2D icon for this slot, if not empty
         int blockID = gHotbar[i];
         if(blockID != BLOCK_NONE) {
-            drawMiniBlockPreview(blockID, x, y, slotSize);
+            drawHotbarBlockIcon2D(blockID, x, y, slotSize);
         }
-    }
+}
 
     glDisable(GL_BLEND);
 }
