@@ -1,39 +1,112 @@
-SHELL := /bin/bash
-CXX := g++
-CXXFLAGS := -std=c++11 -O2 -Wall
-LIBS := -lSDL2 -lGLEW -lGL
+# ==============================
+# Project: C-Craft
+# ==============================
 
-OBJ := main.o shader.o texture.o math.o noise.o cube.o world.o inventory.o
+APP_NAME := voxel
 
-all: voxel
+SRC := \
+	main.cpp \
+	shader.cpp \
+	texture.cpp \
+	math.cpp \
+	noise.cpp \
+	cube.cpp \
+	world.cpp \
+	inventory.cpp
 
-voxel: $(OBJ)
-	$(CXX) $(CXXFLAGS) -o voxel $(OBJ) $(LIBS)
+# ==============================
+# Common flags
+# ==============================
+CXXFLAGS_COMMON := -std=c++11 -O2 -Wall
 
-main.o: main.cpp shader.h texture.h math.h noise.h cube.h camera.h world.h inventory.h
-	$(CXX) $(CXXFLAGS) -c main.cpp
+# ==============================
+# Linux build (native)
+# ==============================
+LINUX_CXX      := g++
+LINUX_OBJDIR   := build/linux
+LINUX_OBJ      := $(addprefix $(LINUX_OBJDIR)/,$(SRC:.cpp=.o))
+LINUX_CXXFLAGS := $(CXXFLAGS_COMMON)
+LINUX_LDFLAGS  := -lSDL2 -lGLEW -lGL -pthread
 
-shader.o: shader.cpp shader.h
-	$(CXX) $(CXXFLAGS) -c shader.cpp
+# ==============================
+# Windows build (MinGW cross)
+# ==============================
+WIN_CXX      := x86_64-w64-mingw32-g++
+WIN_EXE      := $(APP_NAME).exe
+WIN_OBJDIR   := build/windows
+WIN_OBJ      := $(addprefix $(WIN_OBJDIR)/,$(SRC:.cpp=.o))
 
-texture.o: texture.cpp texture.h
-	$(CXX) $(CXXFLAGS) -c texture.cpp
+# MinGW sysroot on Manjaro/Arch (where mingw-w64-sdl2 and mingw-w64-glew install)
+WIN_PREFIX ?= /usr/x86_64-w64-mingw32
 
-math.o: math.cpp math.h
-	$(CXX) $(CXXFLAGS) -c math.cpp
+WIN_INCLUDES := \
+	-I$(WIN_PREFIX)/include \
+	-I$(WIN_PREFIX)/include/SDL2
 
-noise.o: noise.cpp noise.h
-	$(CXX) $(CXXFLAGS) -c noise.cpp
+WIN_LIBDIRS := \
+	-L$(WIN_PREFIX)/lib
 
-cube.o: cube.cpp cube.h
-	$(CXX) $(CXXFLAGS) -c cube.cpp
+WIN_CXXFLAGS := $(CXXFLAGS_COMMON) $(WIN_INCLUDES)
+WIN_LDFLAGS  := $(WIN_LIBDIRS) \
+	-lmingw32 \
+	-lSDL2main \
+	-lSDL2 \
+	-lglew32 \
+	-lopengl32 \
+	-lgdi32 \
+	-lwinmm
 
-world.o: world.cpp world.h noise.h cube.h
-	$(CXX) $(CXXFLAGS) -c world.cpp
-	
-inventory.o: inventory.cpp inventory.h
-	$(CXX) $(CXXFLAGS) -c inventory.cpp	
+# ==============================
+# Targets
+# ==============================
+.PHONY: all linux windows clean help
 
+all: help
+
+help:
+	@echo "Use:"
+	@echo "  make linux    - Build for Linux"
+	@echo "  make windows  - Build for Windows (MinGW on Manjaro)"
+	@echo "  make clean"
+	@echo ""
+	@echo "Manjaro deps (AUR): mingw-w64-sdl2 mingw-w64-glew"
+
+# ------------------------------
+# Linux target
+# ------------------------------
+linux: $(APP_NAME)
+
+$(APP_NAME): $(LINUX_OBJDIR) $(LINUX_OBJ)
+	$(LINUX_CXX) $(LINUX_OBJ) -o $@ $(LINUX_LDFLAGS)
+	@echo "Linux build complete: ./$(APP_NAME)"
+
+$(LINUX_OBJDIR):
+	mkdir -p $(LINUX_OBJDIR)
+
+$(LINUX_OBJDIR)/%.o: %.cpp | $(LINUX_OBJDIR)
+	$(LINUX_CXX) $(LINUX_CXXFLAGS) -c $< -o $@
+
+# ------------------------------
+# Windows target
+# ------------------------------
+windows: $(WIN_EXE)
+
+$(WIN_EXE): $(WIN_OBJDIR) $(WIN_OBJ)
+	$(WIN_CXX) $(WIN_OBJ) -o $@ $(WIN_CXXFLAGS) $(WIN_LDFLAGS)
+	@echo "Windows build complete: $(WIN_EXE)"
+	@echo "Copy assets next to the exe: texture.png hand.png BG.png"
+	@echo "If you link dynamically, also copy SDL2.dll and glew32.dll."
+
+$(WIN_OBJDIR):
+	mkdir -p $(WIN_OBJDIR)
+
+$(WIN_OBJDIR)/%.o: %.cpp | $(WIN_OBJDIR)
+	$(WIN_CXX) $(WIN_CXXFLAGS) -c $< -o $@
+
+# ------------------------------
+# Clean
+# ------------------------------
 clean:
-	rm -f *.o voxel
+	rm -rf build
+	rm -f $(APP_NAME) $(WIN_EXE)
 
