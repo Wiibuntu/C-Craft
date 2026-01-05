@@ -539,6 +539,39 @@ static void uiDrawTexturedRect(GLuint tex, float x, float y, float w, float h) {
     glBindVertexArray(0);
 }
 
+static void uiDrawTexturedRectUV(GLuint tex, float x, float y, float w, float h, const float uv[4][2]) {
+    if(!tex) return;
+
+    // uv is expected to be:
+    // 0: lower-left, 1: lower-right, 2: upper-right, 3: upper-left
+    float v[24] = {
+        // pos      // uv
+        x,   y,     uv[0][0], uv[0][1],
+        x+w, y,     uv[1][0], uv[1][1],
+        x+w, y+h,   uv[2][0], uv[2][1],
+
+        x,   y,     uv[0][0], uv[0][1],
+        x+w, y+h,   uv[2][0], uv[2][1],
+        x,   y+h,   uv[3][0], uv[3][1]
+    };
+
+    glUseProgram(uiTexShader2D);
+    Mat4 proj = orthoPixels(SCREEN_WIDTH, SCREEN_HEIGHT);
+    glUniformMatrix4fv(glGetUniformLocation(uiTexShader2D, "uProj"), 1, GL_FALSE, proj.m);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glUniform1i(glGetUniformLocation(uiTexShader2D, "uTex"), 0);
+
+    glBindVertexArray(uiTexVAO2D);
+    glBindBuffer(GL_ARRAY_BUFFER, uiTexVBO2D);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(v), v);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+}
+
+
+
 // -------------------- 5x7 DEV FONT --------------------
 static void glyph5x7(char c, uint8_t outRows[7]) {
     for(int i=0;i<7;i++) outRows[i]=0;
@@ -1593,84 +1626,26 @@ static void renderChunks(const Mat4 &view, const Mat4 &proj, const Vec3 &viewPos
     glDisable(GL_BLEND);
 }
 
+
 // -------------------- HOTBAR MINI BLOCK PREVIEW --------------------
+// HUD should use the same 2D texture icon approach as the inventory (no 3D cube).
 static void drawMiniBlockPreview(int blockID, float x, float y, float sizePx) {
     if(blockID == BLOCK_NONE) return;
 
-    GLint oldViewport[4];
-    glGetIntegerv(GL_VIEWPORT, oldViewport);
-
     // Inset slightly inside the frame
-    int inset = (int)std::max(2.0f, sizePx * 0.12f);
-    int vx = (int)x + inset;
-    int vy = (int)y + inset;
-    int vs = (int)sizePx - inset*2;
-    if(vs <= 4) vs = (int)sizePx;
+    float inset = std::max(2.0f, sizePx * 0.12f);
+    float px = x + inset;
+    float py = y + inset;
+    float ps = sizePx - inset * 2.0f;
+    if(ps < 4.0f) ps = sizePx;
 
-    glViewport(vx, vy, vs, vs);
+    float uv[4][2];
+    getBlockIconUV((BlockType)blockID, uv);
 
-    // Clear ONLY depth so we can render a 3D cube on top of the world.
-    glClear(GL_DEPTH_BUFFER_BIT);
-
-    glUseProgram(worldShader);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, texID);
-    glUniform1i(glGetUniformLocation(worldShader, "ourTexture"), 0);
-
-    // Simple lit cube like the inventory preview
-    Mat4 proj = perspectiveMatrix(45.0f*(3.14159f/180.0f), 1.0f, 0.1f, 100.0f);
-    Vec3 eye = {0.0f, 0.0f, 2.2f};
-    Vec3 ctr = {0.0f, 0.0f, 0.0f};
-    Vec3 up  = {0.0f, 1.0f, 0.0f};
-    Mat4 view = lookAtMatrix(eye, ctr, up);
-
-    // Mild rotation so it looks Minecraft-like but stable
-    float t = (float)SDL_GetTicks() * 0.001f;
-    Mat4 model = identityMatrix();
-    // rotate around Y a bit:
-    Mat4 rot = identityMatrix();
-    float c = cosf(t * 0.7f);
-    float s = sinf(t * 0.7f);
-    rot.m[0]  =  c;
-    rot.m[2]  =  s;
-    rot.m[8]  = -s;
-    rot.m[10] =  c;
-    model = multiplyMatrix(model, rot);
-
-    Mat4 mvp = multiplyMatrix(proj, multiplyMatrix(view, model));
-    glUniformMatrix4fv(glGetUniformLocation(worldShader, "MVP"), 1, GL_FALSE, mvp.m);
-
-    // Give uniforms used by lighting shader
-    glUniform3f(glGetUniformLocation(worldShader, "sunDirection"), -0.3f, 1.0f, -0.2f);
-    glUniform3f(glGetUniformLocation(worldShader, "viewPos"), eye.x, eye.y, eye.z);
-
-    static GLuint previewVAO = 0, previewVBO = 0;
-    static bool init = false;
-    if(!init) {
-        glGenVertexArrays(1, &previewVAO);
-        glGenBuffers(1, &previewVBO);
-        init = true;
-    }
-
-    std::vector<float> verts;
-    verts.reserve(36*5);
-    // Use "false" for cull flag so all faces are visible in preview
-    addCube(verts, 0.0f, 0.0f, 0.0f, (BlockType)blockID, false);
-
-    glBindVertexArray(previewVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, previewVBO);
-    glBufferData(GL_ARRAY_BUFFER, verts.size()*sizeof(float), verts.data(), GL_DYNAMIC_DRAW);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5*sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5*sizeof(float), (void*)(3*sizeof(float)));
-    glEnableVertexAttribArray(1);
-
-    glEnable(GL_DEPTH_TEST);
-    glDrawArrays(GL_TRIANGLES, 0, 36);
-
-    // Restore viewport
-    glViewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
+    // Draw icon from the block atlas
+    uiDrawTexturedRectUV(texID, px, py, ps, ps, uv);
 }
+
 
 // -------------------- HUD HOTBAR DRAW --------------------
 static void drawHotbarHUD() {

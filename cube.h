@@ -47,7 +47,7 @@ void addCube(std::vector<float>& vertices, float x, float y, float z, BlockType 
 // Returns UVs for a 2D icon/preview of the given block type.
 // The UVs are the four corners: lower-left, lower-right, upper-right, upper-left.
 // Used by the HUD/inventory for static block icons.
-void getBlockIconUV(BlockType blockType, float uv[4][2]);
+bool getBlockIconUV(BlockType blockType, float uv[4][2]);
 
 #endif // CUBE_H
 

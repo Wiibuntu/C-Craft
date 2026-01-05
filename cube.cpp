@@ -87,103 +87,107 @@ void getWaterTileUV(float tileX, float tileY, float uv[4][2]) {
 }
 
 // getBlockIconUV: UVs for a 2D icon representing a block.
+// Returns true if the block has a valid icon; returns false for AIR/empty/unknown.
 // For Minecraft-like visuals, use the side texture for grass/log, otherwise use a single tile.
-void getBlockIconUV(BlockType blockType, float uv[4][2])
+bool getBlockIconUV(BlockType blockType, float uv[4][2])
 {
+    // In this engine, "air" is represented by block id 0 (there is no BLOCK_AIR enum).
+    if ((int)blockType == 0) {
+        return false;
+    }
+
     switch(blockType)
     {
         case BLOCK_GRASS:
             getTileUV(grassSideTileX, grassSideTileY, uv);
-            break;
+            return true;
         case BLOCK_DIRT:
             getTileUV(dirtTile1X, dirtTile1Y, uv);
-            break;
+            return true;
         case BLOCK_STONE:
             getTileUV(stoneTileX, stoneTileY, uv);
-            break;
+            return true;
         case BLOCK_SAND:
             getTileUV(sandTileX, sandTileY, uv);
-            break;
+            return true;
         case BLOCK_BEDROCK:
             getTileUV(bedrockTileX, bedrockTileY, uv);
-            break;
+            return true;
         case BLOCK_TREE_LOG:
             getTileUV(treeLogSideTileX, treeLogSideTileY, uv);
-            break;
+            return true;
         case BLOCK_LEAVES:
             getTileUV(leavesTileX, leavesTileY, uv);
-            break;
+            return true;
         case BLOCK_WATER:
             // Use the inset UVs so water icons don't show atlas seams.
             getWaterTileUV(waterTileX, waterTileY, uv);
-            break;
+            return true;
         case BLOCK_WOODEN_PLANKS:
             getTileUV(woodenPlanksTileX, woodenPlanksTileY, uv);
-            break;
+            return true;
         case BLOCK_COBBLESTONE:
             getTileUV(cobblestoneTileX, cobblestoneTileY, uv);
-            break;
+            return true;
         case BLOCK_GRAVEL:
             getTileUV(gravelTileX, gravelTileY, uv);
-            break;
+            return true;
         case BLOCK_BRICKS:
             getTileUV(bricksTileX, bricksTileY, uv);
-            break;
+            return true;
         case BLOCK_GLASS:
             getTileUV(glassTileX, glassTileY, uv);
-            break;
+            return true;
         case BLOCK_SPONGE:
             getTileUV(spongeTileX, spongeTileY, uv);
-            break;
+            return true;
         case BLOCK_WOOL_WHITE:
             getTileUV(woolWhiteTileX, woolWhiteTileY, uv);
-            break;
+            return true;
         case BLOCK_WOOL_RED:
             getTileUV(woolRedTileX, woolRedTileY, uv);
-            break;
+            return true;
         case BLOCK_WOOL_BLACK:
             getTileUV(woolBlackTileX, woolBlackTileY, uv);
-            break;
+            return true;
         case BLOCK_WOOL_GREY:
             getTileUV(woolGreyTileX, woolGreyTileY, uv);
-            break;
+            return true;
         case BLOCK_WOOL_PINK:
             getTileUV(woolPinkTileX, woolPinkTileY, uv);
-            break;
+            return true;
         case BLOCK_WOOL_LIME_GREEN:
             getTileUV(woolLimeGreenTileX, woolLimeGreenTileY, uv);
-            break;
+            return true;
         case BLOCK_WOOL_GREEN:
             getTileUV(woolGreenTileX, woolGreenTileY, uv);
-            break;
+            return true;
         case BLOCK_WOOL_BROWN:
             getTileUV(woolBrownTileX, woolBrownTileY, uv);
-            break;
+            return true;
         case BLOCK_WOOL_YELLOW:
             getTileUV(woolYellowTileX, woolYellowTileY, uv);
-            break;
+            return true;
         case BLOCK_WOOL_LIGHT_BLUE:
             getTileUV(woolLightBlueTileX, woolLightBlueTileY, uv);
-            break;
+            return true;
         case BLOCK_WOOL_BLUE:
             getTileUV(woolBlueTileX, woolBlueTileY, uv);
-            break;
+            return true;
         case BLOCK_WOOL_PURPLE:
             getTileUV(woolPurpleTileX, woolPurpleTileY, uv);
-            break;
+            return true;
         case BLOCK_WOOL_VIOLET:
             getTileUV(woolVioletTileX, woolVioletTileY, uv);
-            break;
+            return true;
         case BLOCK_WOOL_TURQUOISE:
             getTileUV(woolTurquoiseTileX, woolTurquoiseTileY, uv);
-            break;
+            return true;
         case BLOCK_WOOL_ORANGE:
             getTileUV(woolOrangeTileX, woolOrangeTileY, uv);
-            break;
+            return true;
         default:
-            // Fallback to something valid.
-            getTileUV(stoneTileX, stoneTileY, uv);
-            break;
+            return false;
     }
 }
 
