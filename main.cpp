@@ -42,14 +42,23 @@ GLuint uiShader = 0;
 GLuint uiVAO = 0;
 GLuint uiVBO = 0;
 
-// UI textured shader (for BG.png)
-static GLuint uiTexShader = 0;
-static GLuint uiTexVAO = 0;
-static GLuint uiTexVBO = 0;
+// UI textured shaders
+static GLuint uiTexShaderFullscreen = 0;
+static GLuint uiTexVAOFullscreen = 0;
+static GLuint uiTexVBOFullscreen = 0;
+
+static GLuint uiTexShader2D = 0;
+static GLuint uiTexVAO2D = 0;
+static GLuint uiTexVBO2D = 0;
+
+// Textures
 static GLuint bgTex = 0;
+static GLuint frameTex = 0;
 
 // World shader/texture
 GLuint worldShader = 0;
+GLuint waterShader = 0;
+GLuint vignetteShader = 0;
 GLuint texID = 0;
 
 // Chunk settings
@@ -67,8 +76,8 @@ static const float TICK_INTERVAL = 0.5f;
 
 // Player physics
 static const float playerWidth  = 0.6f;
-static const float playerHeight = 1.8f;     // FIX: 1.8 blocks
-static const float EYE_HEIGHT   = 1.62f;    // FIX: Minecraft-like eye height
+static const float playerHeight = 1.8f;     // Minecraft-ish
+static const float EYE_HEIGHT   = 1.62f;    // Minecraft-ish
 
 static const float WORLD_FLOOR_LIMIT = -10.0f;
 static const float GRAVITY = -9.81f;
@@ -80,6 +89,12 @@ enum class GameState {
     LOADING,
     PLAYING
 };
+
+// -------------------- HOTBAR --------------------
+// Slots 1..9 are visible frames. Slot 0 is "none selected" (virtual).
+static int gHotbar[10];          // indices 0..9, values are BlockType ints (or BLOCK_NONE)
+static int gSelectedSlot = 0;    // 0..9
+static int gLastInventorySelected = BLOCK_NONE;
 
 // -------------------- HELPERS --------------------
 static float clampf(float v, float a, float b) { return std::max(a, std::min(b, v)); }
@@ -152,8 +167,15 @@ static const char* biomeToString(Biome b) {
 // -------------------- WORLD STATE --------------------
 struct Chunk {
     int chunkX, chunkZ;
+
+    // Solid (opaque) geometry
     std::vector<float> vertices;
     GLuint VAO = 0, VBO = 0;
+
+    // Water (transparent) geometry in a separate buffer so we can render it
+    // after opaque blocks with blending enabled.
+    std::vector<float> waterVertices;
+    GLuint waterVAO = 0, waterVBO = 0;
 };
 std::unordered_map<std::pair<int,int>, Chunk, PairHash> chunks;
 
@@ -162,7 +184,7 @@ static std::mutex gWorldMutex;
 
 // -------------------- ASYNC CHUNK PIPELINE --------------------
 struct ChunkJob { int cx, cz; bool rebuild; };
-struct ChunkResult { int cx, cz; std::vector<float> verts; bool rebuild; };
+struct ChunkResult { int cx, cz; std::vector<float> solidVerts; std::vector<float> waterVerts; bool rebuild; };
 
 static std::mutex gJobMutex;
 static std::condition_variable gJobCV;
@@ -225,6 +247,63 @@ void main(){
 }
 )";
 
+static const char* waterFragSrc = R"(
+#version 330 core
+in vec3 FragPos;
+in vec2 TexCoord;
+out vec4 FragColor;
+uniform sampler2D ourTexture;
+uniform vec3 sunDirection;
+uniform vec3 viewPos;
+void main(){
+    vec3 dx = dFdx(FragPos);
+    vec3 dy = dFdy(FragPos);
+    vec3 normal = normalize(cross(dx, dy));
+
+    float diff = max(dot(normal, sunDirection), 0.0);
+    vec3 viewDir = normalize(viewPos - FragPos);
+    vec3 reflectDir = reflect(-sunDirection, normal);
+    float spec = pow(max(dot(viewDir, reflectDir), 0.0), 16.0);
+
+    vec3 ambient = vec3(0.35);
+    vec3 diffuse = vec3(0.55) * diff;
+    vec3 specular = vec3(0.25) * spec;
+    vec3 lighting = ambient + diffuse + specular;
+
+    vec4 texColor = texture(ourTexture, TexCoord);
+    if(texColor.a < 0.05) discard;
+
+    vec3 tint = vec3(0.20, 0.45, 0.85);
+    vec3 rgb = mix(texColor.rgb, tint, 0.35) * lighting;
+    float alpha = 0.55;
+    FragColor = vec4(rgb, alpha);
+}
+)";
+
+static const char* vignetteVertSrc = R"(
+#version 330 core
+layout(location = 0) in vec2 aPos;
+out vec2 vUV;
+void main(){
+    vUV = (aPos + 1.0) * 0.5;
+    gl_Position = vec4(aPos, 0.0, 1.0);
+}
+)";
+
+static const char* vignetteFragSrc = R"(
+#version 330 core
+in vec2 vUV;
+out vec4 FragColor;
+uniform float strength;
+void main(){
+    vec2 p = vUV * 2.0 - 1.0;
+    float d = length(p);
+    float vig = smoothstep(0.55, 1.05, d);
+    float a = clamp(vig * strength, 0.0, 1.0);
+    FragColor = vec4(0.0, 0.0, 0.0, a);
+}
+)";
+
 static const char* uiVertSrc = R"(
 #version 330 core
 layout(location=0) in vec2 aPos;
@@ -240,7 +319,7 @@ void main(){ FragColor = uColor; }
 )";
 
 // Fullscreen textured UI shader (BG.png)
-static const char* uiTexVertSrc = R"(
+static const char* uiTexVertSrcFullscreen = R"(
 #version 330 core
 layout(location=0) in vec2 aPos;
 layout(location=1) in vec2 aUV;
@@ -252,6 +331,29 @@ void main(){
 )";
 
 static const char* uiTexFragSrc = R"(
+#version 330 core
+in vec2 vUV;
+out vec4 FragColor;
+uniform sampler2D uTex;
+void main(){
+    FragColor = texture(uTex, vUV);
+}
+)";
+
+// 2D textured shader for pixel-rects (frame.png)
+static const char* uiTexVertSrc2D = R"(
+#version 330 core
+layout(location=0) in vec2 aPos;
+layout(location=1) in vec2 aUV;
+uniform mat4 uProj;
+out vec2 vUV;
+void main(){
+    vUV = aUV;
+    gl_Position = uProj * vec4(aPos, 0.0, 1.0);
+}
+)";
+
+static const char* uiTexFragSrc2D = R"(
 #version 330 core
 in vec2 vUV;
 out vec4 FragColor;
@@ -286,10 +388,11 @@ static void initUI() {
     glEnableVertexAttribArray(0);
     glBindVertexArray(0);
 
-    // Textured fullscreen quad for BG.png
-    uiTexShader = createShaderProgram(uiTexVertSrc, uiTexFragSrc);
-    glGenVertexArrays(1, &uiTexVAO);
-    glGenBuffers(1, &uiTexVBO);
+    // Fullscreen quad shader (BG.png)
+    uiTexShaderFullscreen = createShaderProgram(uiTexVertSrcFullscreen, uiTexFragSrc);
+
+    glGenVertexArrays(1, &uiTexVAOFullscreen);
+    glGenBuffers(1, &uiTexVBOFullscreen);
 
     float quad[] = {
         // pos      // uv
@@ -301,9 +404,23 @@ static void initUI() {
         -1.f,  1.f,  0.f, 1.f
     };
 
-    glBindVertexArray(uiTexVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, uiTexVBO);
+    glBindVertexArray(uiTexVAOFullscreen);
+    glBindBuffer(GL_ARRAY_BUFFER, uiTexVBOFullscreen);
     glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void*)(2*sizeof(float)));
+    glEnableVertexAttribArray(1);
+    glBindVertexArray(0);
+
+    // 2D textured quads (frame.png)
+    uiTexShader2D = createShaderProgram(uiTexVertSrc2D, uiTexFragSrc2D);
+    glGenVertexArrays(1, &uiTexVAO2D);
+    glGenBuffers(1, &uiTexVBO2D);
+
+    glBindVertexArray(uiTexVAO2D);
+    glBindBuffer(GL_ARRAY_BUFFER, uiTexVBO2D);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 24, nullptr, GL_DYNAMIC_DRAW);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void*)(2*sizeof(float)));
@@ -333,13 +450,91 @@ static void uiDrawRect(float x, float y, float w, float h, float r, float g, flo
     glBindVertexArray(0);
 }
 
+static void uiDrawVignette(float strength) {
+    static GLuint vao = 0, vbo = 0;
+    if(vao == 0) {
+        float quad[12] = {
+            -1.0f, -1.0f,
+             1.0f, -1.0f,
+             1.0f,  1.0f,
+            -1.0f, -1.0f,
+             1.0f,  1.0f,
+            -1.0f,  1.0f
+        };
+        glGenVertexArrays(1, &vao);
+        glGenBuffers(1, &vbo);
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+        glEnableVertexAttribArray(0);
+        glBindVertexArray(0);
+    }
+
+    glUseProgram(vignetteShader);
+    glUniform1f(glGetUniformLocation(vignetteShader, "strength"), clampf(strength, 0.0f, 1.0f));
+
+    glBindVertexArray(vao);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+}
+
+static void drawUnderwaterOverlay(const Camera &camera) {
+    int bx = (int)std::floor(camera.position.x);
+    int by = (int)std::floor(camera.position.y);
+    int bz = (int)std::floor(camera.position.z);
+
+    if(!isWaterBlockAt(bx, by, bz)) return;
+
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    uiDrawRect(0.0f, 0.0f, (float)SCREEN_WIDTH, (float)SCREEN_HEIGHT, 0.10f, 0.25f, 0.60f, 0.18f);
+    uiDrawVignette(0.75f);
+
+    glDisable(GL_BLEND);
+    glEnable(GL_DEPTH_TEST);
+}
+
+
 static void uiDrawFullscreenTexture(GLuint tex) {
     if(!tex) return;
-    glUseProgram(uiTexShader);
+    glUseProgram(uiTexShaderFullscreen);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex);
-    glUniform1i(glGetUniformLocation(uiTexShader, "uTex"), 0);
-    glBindVertexArray(uiTexVAO);
+    glUniform1i(glGetUniformLocation(uiTexShaderFullscreen, "uTex"), 0);
+    glBindVertexArray(uiTexVAOFullscreen);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+}
+
+static void uiDrawTexturedRect(GLuint tex, float x, float y, float w, float h) {
+    if(!tex) return;
+
+    // x,y is bottom-left in pixel-space
+    float v[24] = {
+        // pos      // uv
+        x,   y,     0.f, 0.f,
+        x+w, y,     1.f, 0.f,
+        x+w, y+h,   1.f, 1.f,
+
+        x,   y,     0.f, 0.f,
+        x+w, y+h,   1.f, 1.f,
+        x,   y+h,   0.f, 1.f
+    };
+
+    glUseProgram(uiTexShader2D);
+    Mat4 proj = orthoPixels(SCREEN_WIDTH, SCREEN_HEIGHT);
+    glUniformMatrix4fv(glGetUniformLocation(uiTexShader2D, "uProj"), 1, GL_FALSE, proj.m);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glUniform1i(glGetUniformLocation(uiTexShader2D, "uTex"), 0);
+
+    glBindVertexArray(uiTexVAO2D);
+    glBindBuffer(GL_ARRAY_BUFFER, uiTexVBO2D);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(v), v);
     glDrawArrays(GL_TRIANGLES, 0, 6);
     glBindVertexArray(0);
 }
@@ -1028,10 +1223,12 @@ static bool waterAtLocked(int x, int y, int z)
     return (waterLevels.find(key) != waterLevels.end());
 }
 
-static void buildChunkVerticesCPU(int cx, int cz, std::vector<float> &outVerts)
+static void buildChunkVerticesCPU(int cx, int cz, std::vector<float> &outSolidVerts, std::vector<float> &outWaterVerts)
 {
-    outVerts.clear();
-    outVerts.reserve(16 * 16 * 36 * 5);
+    outSolidVerts.clear();
+    outWaterVerts.clear();
+    outSolidVerts.reserve(16 * 16 * 36 * 5);
+    outWaterVerts.reserve(16 * 16 * 12 * 5);
 
     for(int lx = 0; lx < 16; lx++){
         for(int lz = 0; lz < 16; lz++){
@@ -1065,7 +1262,7 @@ static void buildChunkVerticesCPU(int cx, int cz, std::vector<float> &outVerts)
 
                 if(hasOverride) {
                     if(carved) continue;
-                    addCube(outVerts, (float)wx, (float)y, (float)wz, ov, true);
+                    addCube(outSolidVerts, (float)wx, (float)y, (float)wz, ov, true);
                     continue;
                 }
                 if(hasWater) continue;
@@ -1097,7 +1294,7 @@ static void buildChunkVerticesCPU(int cx, int cz, std::vector<float> &outVerts)
                     else bt = BLOCK_STONE;
                 }
 
-                addCube(outVerts, (float)wx, (float)y, (float)wz, bt, true);
+                addCube(outSolidVerts, (float)wx, (float)y, (float)wz, bt, true);
             }
 
             // Water fill rule: desert only gets water fill near ocean
@@ -1114,7 +1311,7 @@ static void buildChunkVerticesCPU(int cx, int cz, std::vector<float> &outVerts)
                             hasWater = waterAtLocked(wx, y, wz);
                         }
                         if(hasOverride || hasWater) continue;
-                        addCube(outVerts, (float)wx, (float)y, (float)wz, BLOCK_WATER, true);
+                        addCube(outWaterVerts, (float)wx, (float)y, (float)wz, BLOCK_WATER, true);
                     }
                 }
             }
@@ -1124,8 +1321,7 @@ static void buildChunkVerticesCPU(int cx, int cz, std::vector<float> &outVerts)
             bool surfaceIsGrass = (top == BLOCK_GRASS);
 
             if(surfaceIsGrass && shouldPlaceTree(b, wx, wz, surfaceY)) {
-                // FIX: do NOT treat the tree's own overrides as "blocked" on rebuild.
-                // Only block if trunk-base is carved (-1) OR replaced by a non-tree block.
+                // Do NOT treat the tree's own overrides as blocked.
                 bool allowTree = true;
 
                 {
@@ -1134,27 +1330,17 @@ static void buildChunkVerticesCPU(int cx, int cz, std::vector<float> &outVerts)
                     auto it = extraBlocks.find(kBase);
                     if(it != extraBlocks.end()) {
                         BlockType t = it->second;
-
-                        // player broke trunk-base => tree stays gone
-                        if((int)t < 0) {
-                            allowTree = false;
-                        }
-                        // if player placed something else here, don't spawn a tree into it
-                        else if(!isTreeBlock(t)) {
-                            allowTree = false;
-                        }
-                        // else: it's a tree block (log/leaves) => this IS the tree data, keep it
+                        if((int)t < 0) allowTree = false;
+                        else if(!isTreeBlock(t)) allowTree = false;
                     }
                 }
 
                 if(allowTree) {
-                    // Ensure deterministic tree blocks exist, but never overwrite carved (-1) entries.
                     {
                         std::lock_guard<std::mutex> lk(gWorldMutex);
                         ensureTreeBlocksInOverrides(wx, surfaceY + 1, wz);
                     }
-                    // Render from overrides so broken logs/leaves stay gone after rebuilds.
-                    addTreeFromOverrides(outVerts, wx, surfaceY + 1, wz);
+                    addTreeFromOverrides(outSolidVerts, wx, surfaceY + 1, wz);
                 }
             }
         }
@@ -1174,7 +1360,7 @@ static void buildChunkVerticesCPU(int cx, int cz, std::vector<float> &outVerts)
         int ccx, ccz;
         getChunkCoords(bx, bz, ccx, ccz);
         if(ccx == cx && ccz == cz) {
-            addCube(outVerts, (float)bx, (float)by, (float)bz, BLOCK_WATER, true);
+            addCube(outWaterVerts, (float)bx, (float)by, (float)bz, BLOCK_WATER, true);
         }
     }
 }
@@ -1195,7 +1381,7 @@ static void chunkWorkerThread() {
         res.cx = job.cx;
         res.cz = job.cz;
         res.rebuild = job.rebuild;
-        buildChunkVerticesCPU(job.cx, job.cz, res.verts);
+        buildChunkVerticesCPU(job.cx, job.cz, res.solidVerts, res.waterVerts);
 
         {
             std::lock_guard<std::mutex> lk(gDoneMutex);
@@ -1205,22 +1391,38 @@ static void chunkWorkerThread() {
 }
 
 // -------------------- MAIN THREAD UPLOAD --------------------
-static void uploadChunkToGPU(int cx, int cz, const std::vector<float> &verts, bool rebuild) {
+static void uploadChunkToGPU(int cx, int cz,
+                             const std::vector<float> &solidVerts,
+                             const std::vector<float> &waterVerts,
+                             bool rebuild)
+{
     std::pair<int,int> key = {cx, cz};
+
+    auto uploadOne = [](GLuint &vao, GLuint &vbo, const std::vector<float> &verts){
+        if(vao == 0) glGenVertexArrays(1, &vao);
+        if(vbo == 0) glGenBuffers(1, &vbo);
+
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float),
+                     verts.empty() ? nullptr : verts.data(),
+                     GL_STATIC_DRAW);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
+        glEnableVertexAttribArray(1);
+        glBindVertexArray(0);
+    };
 
     if(rebuild) {
         auto it = chunks.find(key);
         if(it != chunks.end()) {
             Chunk &chunk = it->second;
-            chunk.vertices = verts;
-            glBindVertexArray(chunk.VAO);
-            glBindBuffer(GL_ARRAY_BUFFER, chunk.VBO);
-            glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
-            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
-            glEnableVertexAttribArray(0);
-            glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
-            glEnableVertexAttribArray(1);
-            glBindVertexArray(0);
+            chunk.vertices = solidVerts;
+            chunk.waterVertices = waterVerts;
+
+            uploadOne(chunk.VAO, chunk.VBO, chunk.vertices);
+            uploadOne(chunk.waterVAO, chunk.waterVBO, chunk.waterVertices);
             return;
         }
     }
@@ -1228,19 +1430,11 @@ static void uploadChunkToGPU(int cx, int cz, const std::vector<float> &verts, bo
     Chunk chunk;
     chunk.chunkX = cx;
     chunk.chunkZ = cz;
-    chunk.vertices = verts;
+    chunk.vertices = solidVerts;
+    chunk.waterVertices = waterVerts;
 
-    glGenVertexArrays(1, &chunk.VAO);
-    glGenBuffers(1, &chunk.VBO);
-
-    glBindVertexArray(chunk.VAO);
-    glBindBuffer(GL_ARRAY_BUFFER, chunk.VBO);
-    glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-    glBindVertexArray(0);
+    uploadOne(chunk.VAO, chunk.VBO, chunk.vertices);
+    uploadOne(chunk.waterVAO, chunk.waterVBO, chunk.waterVertices);
 
     chunks[key] = chunk;
 }
@@ -1276,6 +1470,7 @@ static void rebuildChunkAsync(int cx, int cz) {
 
 // -------------------- RENDER --------------------
 static void renderChunks(const Mat4 &view, const Mat4 &proj, const Vec3 &viewPos) {
+    // -------- Opaque pass --------
     glUseProgram(worldShader);
 
     Mat4 VP = multiplyMatrix(proj, view);
@@ -1294,6 +1489,147 @@ static void renderChunks(const Mat4 &view, const Mat4 &proj, const Vec3 &viewPos
         glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(chunk.vertices.size() / 5));
     }
     glBindVertexArray(0);
+
+    // -------- Water pass (transparent) --------
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+
+    glUseProgram(waterShader);
+    glUniformMatrix4fv(glGetUniformLocation(waterShader, "MVP"), 1, GL_FALSE, VP.m);
+    glUniform1i(glGetUniformLocation(waterShader, "ourTexture"), 0);
+    glUniform3f(glGetUniformLocation(waterShader, "sunDirection"), -0.3f, 1.0f, -0.2f);
+    glUniform3f(glGetUniformLocation(waterShader, "viewPos"), viewPos.x, viewPos.y, viewPos.z);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, texID);
+
+    for(auto &entry : chunks) {
+        Chunk &chunk = entry.second;
+        if(chunk.waterVertices.empty()) continue;
+        glBindVertexArray(chunk.waterVAO);
+        glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(chunk.waterVertices.size() / 5));
+    }
+    glBindVertexArray(0);
+
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+}
+
+// -------------------- HOTBAR MINI BLOCK PREVIEW --------------------
+static void drawMiniBlockPreview(int blockID, float x, float y, float sizePx) {
+    if(blockID == BLOCK_NONE) return;
+
+    GLint oldViewport[4];
+    glGetIntegerv(GL_VIEWPORT, oldViewport);
+
+    // Inset slightly inside the frame
+    int inset = (int)std::max(2.0f, sizePx * 0.12f);
+    int vx = (int)x + inset;
+    int vy = (int)y + inset;
+    int vs = (int)sizePx - inset*2;
+    if(vs <= 4) vs = (int)sizePx;
+
+    glViewport(vx, vy, vs, vs);
+
+    // Clear ONLY depth so we can render a 3D cube on top of the world.
+    glClear(GL_DEPTH_BUFFER_BIT);
+
+    glUseProgram(worldShader);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, texID);
+    glUniform1i(glGetUniformLocation(worldShader, "ourTexture"), 0);
+
+    // Simple lit cube like the inventory preview
+    Mat4 proj = perspectiveMatrix(45.0f*(3.14159f/180.0f), 1.0f, 0.1f, 100.0f);
+    Vec3 eye = {0.0f, 0.0f, 2.2f};
+    Vec3 ctr = {0.0f, 0.0f, 0.0f};
+    Vec3 up  = {0.0f, 1.0f, 0.0f};
+    Mat4 view = lookAtMatrix(eye, ctr, up);
+
+    // Mild rotation so it looks Minecraft-like but stable
+    float t = (float)SDL_GetTicks() * 0.001f;
+    Mat4 model = identityMatrix();
+    // rotate around Y a bit:
+    Mat4 rot = identityMatrix();
+    float c = cosf(t * 0.7f);
+    float s = sinf(t * 0.7f);
+    rot.m[0]  =  c;
+    rot.m[2]  =  s;
+    rot.m[8]  = -s;
+    rot.m[10] =  c;
+    model = multiplyMatrix(model, rot);
+
+    Mat4 mvp = multiplyMatrix(proj, multiplyMatrix(view, model));
+    glUniformMatrix4fv(glGetUniformLocation(worldShader, "MVP"), 1, GL_FALSE, mvp.m);
+
+    // Give uniforms used by lighting shader
+    glUniform3f(glGetUniformLocation(worldShader, "sunDirection"), -0.3f, 1.0f, -0.2f);
+    glUniform3f(glGetUniformLocation(worldShader, "viewPos"), eye.x, eye.y, eye.z);
+
+    static GLuint previewVAO = 0, previewVBO = 0;
+    static bool init = false;
+    if(!init) {
+        glGenVertexArrays(1, &previewVAO);
+        glGenBuffers(1, &previewVBO);
+        init = true;
+    }
+
+    std::vector<float> verts;
+    verts.reserve(36*5);
+    // Use "false" for cull flag so all faces are visible in preview
+    addCube(verts, 0.0f, 0.0f, 0.0f, (BlockType)blockID, false);
+
+    glBindVertexArray(previewVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, previewVBO);
+    glBufferData(GL_ARRAY_BUFFER, verts.size()*sizeof(float), verts.data(), GL_DYNAMIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5*sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5*sizeof(float), (void*)(3*sizeof(float)));
+    glEnableVertexAttribArray(1);
+
+    glEnable(GL_DEPTH_TEST);
+    glDrawArrays(GL_TRIANGLES, 0, 36);
+
+    // Restore viewport
+    glViewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
+}
+
+// -------------------- HUD HOTBAR DRAW --------------------
+static void drawHotbarHUD() {
+    // Only draw slots 1..9 frames. Slot 0 is "none".
+    const float slotSize = 52.0f;
+    const float spacing  = 4.0f;
+    const float y = 10.0f;
+
+    float totalW = 9.0f * slotSize + 8.0f * spacing;
+    float startX = ((float)SCREEN_WIDTH - totalW) * 0.5f;
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    // Shadow backdrop strip
+    uiDrawRect(startX - 6.0f, y - 6.0f, totalW + 12.0f, slotSize + 12.0f, 0,0,0, 0.25f);
+
+    for(int i=1;i<=9;i++){
+        float x = startX + (i-1) * (slotSize + spacing);
+
+        // Highlight selected slot (only when selectedSlot != 0)
+        if(gSelectedSlot == i) {
+            uiDrawRect(x - 2.0f, y - 2.0f, slotSize + 4.0f, slotSize + 4.0f, 1,1,1, 0.35f);
+        }
+
+        // Draw frame texture
+        uiDrawTexturedRect(frameTex, x, y, slotSize, slotSize);
+
+        // Draw mini cube for this slot, if not empty
+        int blockID = gHotbar[i];
+        if(blockID != BLOCK_NONE) {
+            drawMiniBlockPreview(blockID, x, y, slotSize);
+        }
+    }
+
+    glDisable(GL_BLEND);
 }
 
 // -------------------- DEV OVERLAY DRAW --------------------
@@ -1411,6 +1747,8 @@ static void clearChunkGPU() {
     for(auto &kv : chunks) {
         glDeleteVertexArrays(1, &kv.second.VAO);
         glDeleteBuffers(1, &kv.second.VBO);
+        glDeleteVertexArrays(1, &kv.second.waterVAO);
+        glDeleteBuffers(1, &kv.second.waterVBO);
     }
     chunks.clear();
 }
@@ -1445,6 +1783,11 @@ static void resetWorldData(bool wipeSaveFile) {
     if(wipeSaveFile) {
         std::remove("saved_world.txt");
     }
+
+    // Reset hotbar on new world creation/loading start
+    for(int i=0;i<10;i++) gHotbar[i] = BLOCK_NONE;
+    gSelectedSlot = 0;
+    gLastInventorySelected = BLOCK_NONE;
 }
 
 static void requestInitialChunks(int spawnChunkX, int spawnChunkZ) {
@@ -1464,6 +1807,40 @@ static int countLoadedInitialChunks(int spawnChunkX, int spawnChunkZ) {
         }
     }
     return loaded;
+}
+
+// -------------------- HOTBAR INPUT + ASSIGNMENT --------------------
+static void hotbarSelectSlot(int slot) {
+    slot = std::max(0, std::min(9, slot));
+    gSelectedSlot = slot;
+}
+
+static void hotbarScroll(int dir) {
+    // dir: +1 next, -1 prev
+    int s = gSelectedSlot;
+    s += dir;
+    if(s > 9) s = 0;
+    if(s < 0) s = 9;
+    gSelectedSlot = s;
+}
+
+static void hotbarAssignSelectedBlock(int blockID) {
+    if(blockID == BLOCK_NONE) return;
+
+    // Slot 0 is always "none selected". If player tries to assign while on 0,
+    // we move to slot 1.
+    if(gSelectedSlot == 0) gSelectedSlot = 1;
+
+    // Assign to current slot 1..9
+    if(gSelectedSlot >= 1 && gSelectedSlot <= 9) {
+        gHotbar[gSelectedSlot] = blockID;
+    }
+}
+
+static int hotbarGetActiveBlock() {
+    if(gSelectedSlot == 0) return BLOCK_NONE;
+    if(gSelectedSlot < 0 || gSelectedSlot > 9) return BLOCK_NONE;
+    return gHotbar[gSelectedSlot];
 }
 
 // -------------------- MAIN --------------------
@@ -1512,6 +1889,8 @@ int main(int, char**) {
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     worldShader = createShaderProgram(worldVertSrc, worldFragSrc);
+    waterShader = createShaderProgram(worldVertSrc, waterFragSrc);
+    vignetteShader = createShaderProgram(vignetteVertSrc, vignetteFragSrc);
     texID = loadTexture("texture.png");
     if(!texID) {
         std::cerr << "Texture failed to load!\n";
@@ -1539,8 +1918,22 @@ int main(int, char**) {
         return -1;
     }
 
+    frameTex = loadTexture("frame.png");
+    if(!frameTex) {
+        std::cerr << "frame.png failed to load!\n";
+        SDL_GL_DeleteContext(glContext);
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return -1;
+    }
+
     initUI();
     Inventory inventory;
+
+    // init hotbar
+    for(int i=0;i<10;i++) gHotbar[i] = BLOCK_NONE;
+    gSelectedSlot = 0;
+    gLastInventorySelected = inventory.getSelectedBlock();
 
     std::thread worker(chunkWorkerThread);
 
@@ -1678,7 +2071,7 @@ int main(int, char**) {
             }
             if(!hasOne) break;
 
-            uploadChunkToGPU(res.cx, res.cz, res.verts, res.rebuild);
+            uploadChunkToGPU(res.cx, res.cz, res.solidVerts, res.waterVerts, res.rebuild);
 
             if(!res.rebuild) {
                 std::lock_guard<std::mutex> lk(gRequestedMutex);
@@ -1718,10 +2111,37 @@ int main(int, char**) {
                 }
             }
             else if(state == GameState::PLAYING) {
+                // HOTBAR input works during PLAYING even if paused/inventory open
                 if(ev.type == SDL_KEYDOWN) {
-                    if(ev.key.keysym.sym == SDLK_F3) {
+                    SDL_Keycode kc = ev.key.keysym.sym;
+
+                    // Number row
+                    if(kc == SDLK_0) hotbarSelectSlot(0);
+                    if(kc == SDLK_1) hotbarSelectSlot(1);
+                    if(kc == SDLK_2) hotbarSelectSlot(2);
+                    if(kc == SDLK_3) hotbarSelectSlot(3);
+                    if(kc == SDLK_4) hotbarSelectSlot(4);
+                    if(kc == SDLK_5) hotbarSelectSlot(5);
+                    if(kc == SDLK_6) hotbarSelectSlot(6);
+                    if(kc == SDLK_7) hotbarSelectSlot(7);
+                    if(kc == SDLK_8) hotbarSelectSlot(8);
+                    if(kc == SDLK_9) hotbarSelectSlot(9);
+
+                    // Keypad
+                    if(kc == SDLK_KP_0) hotbarSelectSlot(0);
+                    if(kc == SDLK_KP_1) hotbarSelectSlot(1);
+                    if(kc == SDLK_KP_2) hotbarSelectSlot(2);
+                    if(kc == SDLK_KP_3) hotbarSelectSlot(3);
+                    if(kc == SDLK_KP_4) hotbarSelectSlot(4);
+                    if(kc == SDLK_KP_5) hotbarSelectSlot(5);
+                    if(kc == SDLK_KP_6) hotbarSelectSlot(6);
+                    if(kc == SDLK_KP_7) hotbarSelectSlot(7);
+                    if(kc == SDLK_KP_8) hotbarSelectSlot(8);
+                    if(kc == SDLK_KP_9) hotbarSelectSlot(9);
+
+                    if(kc == SDLK_F3) {
                         showDevOverlay = !showDevOverlay;
-                    } else if(ev.key.keysym.sym == SDLK_ESCAPE) {
+                    } else if(kc == SDLK_ESCAPE) {
                         if(inventory.isOpen()) {
                             inventory.toggle();
                             SDL_SetRelativeMouseMode(SDL_TRUE);
@@ -1729,19 +2149,25 @@ int main(int, char**) {
                             paused = !paused;
                             SDL_SetRelativeMouseMode(paused ? SDL_FALSE : SDL_TRUE);
                         }
-                    } else if(ev.key.keysym.sym == SDLK_e) {
+                    } else if(kc == SDLK_e) {
                         if(!paused) {
                             inventory.toggle();
                             SDL_SetRelativeMouseMode(inventory.isOpen() ? SDL_FALSE : SDL_TRUE);
                         }
-                    } else if(!paused && !inventory.isOpen() && !isFlying && ev.key.keysym.sym == SDLK_SPACE) {
+                    } else if(!paused && !inventory.isOpen() && !isFlying && kc == SDLK_SPACE) {
                         Vec3 testFeet = playerFeet;
                         testFeet.y -= 0.05f;
                         if(checkCollisionFeet(testFeet)) verticalVelocity = JUMP_SPEED;
-                    } else if(ev.key.keysym.sym == SDLK_f) {
+                    } else if(kc == SDLK_f) {
                         isFlying = !isFlying;
                         verticalVelocity = 0.0f;
                     }
+                }
+
+                if(ev.type == SDL_MOUSEWHEEL) {
+                    // wheel.y > 0 means scroll up (previous), < 0 means next
+                    if(ev.wheel.y > 0) hotbarScroll(-1);
+                    else if(ev.wheel.y < 0) hotbarScroll(+1);
                 }
 
                 if(!paused && !inventory.isOpen()) {
@@ -1766,6 +2192,7 @@ int main(int, char**) {
 
                     if(ev.button.button == SDL_BUTTON_LEFT) {
                         std::lock_guard<std::mutex> lk(gWorldMutex);
+                        waterLevels.erase({bx, by, bz});
                         extraBlocks[{bx, by, bz}] = (BlockType)-1;
                         int ccx, ccz; getChunkCoords(bx, bz, ccx, ccz);
                         rebuildChunkAsync(ccx, ccz);
@@ -1780,8 +2207,8 @@ int main(int, char**) {
                         else if(ay > ax && ay > az) py += (diff.y > 0) ? -1 : 1;
                         else pz += (diff.z > 0) ? -1 : 1;
 
-                        int blockToPlace = inventory.getSelectedBlock();
-                        if(blockToPlace != (int)BLOCK_NONE) {
+                        int blockToPlace = hotbarGetActiveBlock(); // HOTBAR drives placement
+                        if(blockToPlace != BLOCK_NONE) {
                             Vec3 pos = playerFeet;
                             float half = playerWidth * 0.5f;
                             float minX = pos.x - half, maxX = pos.x + half;
@@ -1793,7 +2220,13 @@ int main(int, char**) {
                                  pz + 1 > minZ && pz < maxZ)) {
 
                                 std::lock_guard<std::mutex> lk(gWorldMutex);
-                                extraBlocks[{px, py, pz}] = (BlockType)blockToPlace;
+                                if(blockToPlace == BLOCK_WATER) {
+                                    waterLevels[{px, py, pz}] = 8;
+                                    extraBlocks.erase({px, py, pz});
+                                } else {
+                                    waterLevels.erase({px, py, pz});
+                                    extraBlocks[{px, py, pz}] = (BlockType)blockToPlace;
+                                }
                                 int ccx, ccz; getChunkCoords(px, pz, ccx, ccz);
                                 rebuildChunkAsync(ccx, ccz);
                             }
@@ -1902,7 +2335,17 @@ int main(int, char**) {
                 }
             }
 
+            // Inventory update (selection is still made in inventory)
             inventory.update(dt, camera);
+
+            // If the inventory selection changed, push it into the hotbar slot
+            int invSel = inventory.getSelectedBlock();
+            if(invSel != gLastInventorySelected) {
+                gLastInventorySelected = invSel;
+                if(invSel != BLOCK_NONE) {
+                    hotbarAssignSelectedBlock(invSel);
+                }
+            }
         }
 
         glViewport(0,0,SCREEN_WIDTH,SCREEN_HEIGHT);
@@ -1945,6 +2388,10 @@ int main(int, char**) {
             Mat4 view = lookAtMatrix(camera.position, add(camera.position, forward), {0,1,0});
             renderChunks(view, projWorld, camera.position);
 
+            // Underwater camera effects (blue filter + vignette)
+            drawUnderwaterOverlay(camera);
+
+            // UI overlays
             glDisable(GL_DEPTH_TEST);
 
             if(inventory.isOpen()) {
@@ -1953,7 +2400,11 @@ int main(int, char**) {
             if(paused) {
                 drawPauseOverlay(true);
             }
+
             drawDevOverlay(showDevOverlay, playerFeet);
+
+            // HOTBAR HUD (draw last so it's always visible)
+            drawHotbarHUD();
 
             glEnable(GL_DEPTH_TEST);
         }
@@ -1974,13 +2425,17 @@ int main(int, char**) {
 
     glDeleteProgram(worldShader);
     glDeleteProgram(uiShader);
-    glDeleteProgram(uiTexShader);
+    glDeleteProgram(uiTexShaderFullscreen);
+    glDeleteProgram(uiTexShader2D);
 
     glDeleteVertexArrays(1, &uiVAO);
     glDeleteBuffers(1, &uiVBO);
 
-    glDeleteVertexArrays(1, &uiTexVAO);
-    glDeleteBuffers(1, &uiTexVBO);
+    glDeleteVertexArrays(1, &uiTexVAOFullscreen);
+    glDeleteBuffers(1, &uiTexVBOFullscreen);
+
+    glDeleteVertexArrays(1, &uiTexVAO2D);
+    glDeleteBuffers(1, &uiTexVBO2D);
 
     SDL_GL_DeleteContext(glContext);
     SDL_DestroyWindow(window);

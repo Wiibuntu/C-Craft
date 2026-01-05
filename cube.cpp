@@ -86,6 +86,108 @@ void getWaterTileUV(float tileX, float tileY, float uv[4][2]) {
     uv[3][0] = tileX * tileSize + offset;       uv[3][1] = tileY * tileSize + offset + adjustedTileSize;
 }
 
+
+// Returns UVs for a 2D icon representing this block. This is deterministic (no random variants)
+// and is intended for HUD/inventory static texture rendering.
+bool getBlockIconUV(BlockType blockType, float uv[4][2]) {
+    switch(blockType) {
+        case BLOCK_GRASS:
+            // Best single-tile approximation of a grass block in the HUD: use the side texture.
+            getTileUV(grassSideTileX, grassSideTileY, uv);
+            return true;
+        case BLOCK_DIRT:
+            getTileUV(dirtTile1X, dirtTile1Y, uv);
+            return true;
+        case BLOCK_STONE:
+            getTileUV(stoneTileX, stoneTileY, uv);
+            return true;
+        case BLOCK_SAND:
+            getTileUV(sandTileX, sandTileY, uv);
+            return true;
+        case BLOCK_BEDROCK:
+            getTileUV(bedrockTileX, bedrockTileY, uv);
+            return true;
+        case BLOCK_TREE_LOG:
+            // Use the side texture so it reads as "log" in a 2D icon.
+            getTileUV(treeLogSideTileX, treeLogSideTileY, uv);
+            return true;
+        case BLOCK_LEAVES:
+            getTileUV(leavesTileX, leavesTileY, uv);
+            return true;
+        case BLOCK_WATER:
+            getWaterTileUV(waterTileX, waterTileY, uv);
+            return true;
+        case BLOCK_WOODEN_PLANKS:
+            getTileUV(woodenPlanksTileX, woodenPlanksTileY, uv);
+            return true;
+        case BLOCK_COBBLESTONE:
+            getTileUV(cobblestoneTileX, cobblestoneTileY, uv);
+            return true;
+        case BLOCK_GRAVEL:
+            getTileUV(gravelTileX, gravelTileY, uv);
+            return true;
+        case BLOCK_BRICKS:
+            getTileUV(bricksTileX, bricksTileY, uv);
+            return true;
+        case BLOCK_GLASS:
+            getTileUV(glassTileX, glassTileY, uv);
+            return true;
+        case BLOCK_SPONGE:
+            getTileUV(spongeTileX, spongeTileY, uv);
+            return true;
+        case BLOCK_WOOL_WHITE:
+            getTileUV(woolWhiteTileX, woolWhiteTileY, uv);
+            return true;
+        case BLOCK_WOOL_RED:
+            getTileUV(woolRedTileX, woolRedTileY, uv);
+            return true;
+        case BLOCK_WOOL_BLACK:
+            getTileUV(woolBlackTileX, woolBlackTileY, uv);
+            return true;
+        case BLOCK_WOOL_GREY:
+            getTileUV(woolGreyTileX, woolGreyTileY, uv);
+            return true;
+        case BLOCK_WOOL_PINK:
+            getTileUV(woolPinkTileX, woolPinkTileY, uv);
+            return true;
+        case BLOCK_WOOL_LIME_GREEN:
+            getTileUV(woolLimeGreenTileX, woolLimeGreenTileY, uv);
+            return true;
+        case BLOCK_WOOL_GREEN:
+            getTileUV(woolGreenTileX, woolGreenTileY, uv);
+            return true;
+        case BLOCK_WOOL_BROWN:
+            getTileUV(woolBrownTileX, woolBrownTileY, uv);
+            return true;
+        case BLOCK_WOOL_YELLOW:
+            getTileUV(woolYellowTileX, woolYellowTileY, uv);
+            return true;
+        case BLOCK_WOOL_LIGHT_BLUE:
+            getTileUV(woolLightBlueTileX, woolLightBlueTileY, uv);
+            return true;
+        case BLOCK_WOOL_BLUE:
+            getTileUV(woolBlueTileX, woolBlueTileY, uv);
+            return true;
+        case BLOCK_WOOL_PURPLE:
+            getTileUV(woolPurpleTileX, woolPurpleTileY, uv);
+            return true;
+        case BLOCK_WOOL_VIOLET:
+            getTileUV(woolVioletTileX, woolVioletTileY, uv);
+            return true;
+        case BLOCK_WOOL_TURQUOISE:
+            getTileUV(woolTurquoiseTileX, woolTurquoiseTileY, uv);
+            return true;
+        case BLOCK_WOOL_ORANGE:
+            getTileUV(woolOrangeTileX, woolOrangeTileY, uv);
+            return true;
+        default:
+            break;
+    }
+
+    // No icon for BLOCK_NONE (or unknown)
+    return false;
+}
+
 // addCube: Generates geometry for a cube at (x,y,z) using textures selected by blockType.
 // If cullFaces is true, only faces not adjacent to a solid block are added.
 void addCube(std::vector<float>& vertices, float x, float y, float z, BlockType blockType, bool cullFaces)

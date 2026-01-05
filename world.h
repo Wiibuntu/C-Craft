@@ -4,6 +4,7 @@
 #include <string>
 #include <unordered_map>
 #include <tuple>
+
 #include "cube.h"
 #include "globals.h"
 
@@ -22,5 +23,7 @@ bool saveWorld(const char* filename, int seed,
 // Returns true if the block at the given coordinates is solid.
 bool isSolidBlock(int bx, int by, int bz);
 
-#endif
+// Returns true if there is water (any level 1–8) at the given coordinates.
+bool isWaterBlockAt(int bx, int by, int bz);
 
+#endif
